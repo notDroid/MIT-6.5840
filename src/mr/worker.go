@@ -33,6 +33,7 @@ func (a ByKey) Less(i, j int) bool { return a[i].Key < a[j].Key }
 type ReduceWorker struct {
 	filename string
 	file     *os.File
+	listener *net.Listener
 }
 
 type WorkerServer struct{}
@@ -45,7 +46,7 @@ func ihash(key string) int {
 	return int(h.Sum32() & 0x7fffffff)
 }
 
-var cSock = coordinatorSock() // Runtime constant
+var cSock = CoordinatorSock() // Runtime constant
 var m = sync.Mutex{}          // Worker mutex
 var wg = sync.WaitGroup{}     // Reduce wait for all map files
 
@@ -56,30 +57,29 @@ func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string)
 	w.server()
 
 	// Set up Coordinator RPC
-	wSock := workerSock()
-
-	args := Identifier{wSock}
-	reply := TaskReply{}
+	wSock := WorkerSock()
 
 	// Poll until task assigned
 	for {
-		err := call(cSock, "Coordinator.GetTask", &args, &reply)
+		args := Identifier{wSock}
+		reply := TaskReply{}
+		err := RPCall(cSock, "Coordinator.GetTask", &args, &reply)
 
 		// Coordinator didn't respond, assume its done
 		if err != nil {
-			fmt.Println("Coordinator didn't respond, giving up") // ----------------------------------------------------- TEMPORARY COMMENT ----------------------------------------
+			// fmt.Println("Coordinator didn't respond, giving up:", err)
 			return
 		}
 
 		// If we get a map or reduce task, execute it
-		if reply.task == "map" {
-			fmt.Println("Worker recieved map task") // ----------------------------------------------------- TEMPORARY COMMENT ----------------------------------------
-			executeMap(reply.mapTask, mapf)
-		} else if reply.task == "reduce" {
-			fmt.Println("Worker recieved reduce task") // ----------------------------------------------------- TEMPORARY COMMENT ----------------------------------------
-			executeReduce(reply.reduceTask, reducef)
+		if reply.Task == "map" {
+			// fmt.Println("Worker recieved map task:", reply.MapTask.Id)
+			executeMap(reply.MapTask, mapf)
+		} else if reply.Task == "reduce" {
+			// fmt.Println("Worker recieved reduce task")
+			executeReduce(reply.ReduceTask, reducef)
 		} else {
-			fmt.Println("Worker didn't recieve task") // ----------------------------------------------------- TEMPORARY COMMENT ----------------------------------------
+			// fmt.Println("Worker didn't recieve task")
 			time.Sleep(time.Second)
 		}
 	}
@@ -87,7 +87,7 @@ func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string)
 
 func executeMap(mapTask MapTask, mapf func(string, string) []KeyValue) {
 	// Execute map function on data
-	intermediate := mapf(mapTask.filename, fetchInputSplit(mapTask.filename)) // We fit the entire result in memory, don't stream into map output
+	intermediate := mapf(mapTask.Filename, fetchInputSplit(mapTask.Filename)) // We fit the entire result in memory, don't stream into map output
 
 	// ------------------ Store on local disk
 
@@ -97,12 +97,12 @@ func executeMap(mapTask MapTask, mapf func(string, string) []KeyValue) {
 	var encoders []*json.Encoder
 	for i := range mapTask.R {
 		filename := "mr-"
-		filename += "mid-" + strconv.Itoa(mapTask.id) + "-rid-" + strconv.Itoa(i) // Map id, reduce id pair
+		filename += "mid-" + strconv.Itoa(mapTask.Id) + "-rid-" + strconv.Itoa(i) // Map id, reduce id pair
 		iFiles = append(iFiles, filename)
 
 		file, err := os.Create(filename)
 		if err != nil {
-			log.Fatalf("Error creating intermediate file: %v", filename)
+			log.Fatalf("Error creating intermediate file %v: %v\n", filename, err)
 		}
 		openFiles = append(openFiles, file)
 
@@ -115,7 +115,7 @@ func executeMap(mapTask MapTask, mapf func(string, string) []KeyValue) {
 		rId := ihash(kv.Key) % mapTask.R
 		err := encoders[rId].Encode(&kv)
 		if err != nil {
-			log.Fatalf("Error creating intermediate file: %v", iFiles[rId])
+			log.Fatalln("Error creating intermediate file:", iFiles[rId])
 		}
 	}
 
@@ -128,15 +128,15 @@ func executeMap(mapTask MapTask, mapf func(string, string) []KeyValue) {
 
 	// Report completion with intermediate locations
 	args := MapIntermediate{
-		id:     mapTask.id,
-		iFiles: iFiles,
+		Id:     mapTask.Id,
+		IFiles: iFiles,
 	}
 
-	err := call(cSock, "Coordinator.ReportCompletedMapTask", &args, &struct{}{})
+	err := RPCall(cSock, "Coordinator.ReportCompletedMapTask", &args, &struct{}{})
 
 	// If the rpc fails we are cooked
 	if err != nil {
-		log.Fatalf("Error informing map task completion to coordinator")
+		log.Fatalln("Error informing map task completion to coordinator:", err)
 	}
 }
 
@@ -145,12 +145,12 @@ func fetchInputSplit(filename string) string {
 	// Read file contents
 	file, err := os.Open(filename)
 	if err != nil {
-		log.Fatalf("cannot open %v", filename)
+		log.Fatalf("cannot open %v: %v\n", filename, err)
 	}
 	content, err := io.ReadAll(file)
 	file.Close()
 	if err != nil {
-		log.Fatalf("cannot read %v", filename)
+		log.Fatalf("cannot read %v: %v\n", filename, err)
 	}
 
 	return string(content)
@@ -160,25 +160,36 @@ func executeReduce(reduceTask ReduceTask, reducef func(string, []string) string)
 	//
 	// Collect all data for our partition
 	//
-	filename := "mr-rid-" + strconv.Itoa(reduceTask.id) // Reduce id
+	filename := "mr-rid-" + strconv.Itoa(reduceTask.Id) // Reduce id
 	file, err := os.Create(filename)
 	if err != nil {
-		log.Fatalf("Error creating reduce input file: %v", filename)
+		log.Fatalf("Error creating reduce input file %v: %v\n", filename, err)
 	}
-	r := ReduceWorker{filename: filename}
+
+	r := ReduceWorker{
+		filename: filename,
+		file:     file,
+	}
 	wg.Add(reduceTask.M) // Start server and wait
 	r.server()
 
 	// Request from all map tasks already finished
-	for _, iFile := range reduceTask.iFiles {
-		go r.getIntermediate(iFile.sock, iFile.filename)
+	for _, iFile := range reduceTask.IFiles {
+		go r.getIntermediate(iFile.Sock, iFile.Filename)
 	}
 
 	wg.Wait()
+	r.close() // Close the server
 
 	//
 	// Sort key value pairs by key
 	//
+
+	// Reset the file cursor to the beginning
+	_, err = file.Seek(0, 0)
+	if err != nil {
+		log.Fatalln("Couldn't reset cursor in reduce input file", err)
+	}
 
 	// Read the data from the file, assume it all fits in memory.
 	intermediate := []KeyValue{}
@@ -199,7 +210,7 @@ func executeReduce(reduceTask ReduceTask, reducef func(string, []string) string)
 	// call Reduce on each distinct key in intermediate[],
 	// and print the result to mr-out-{reduce id}.
 	//
-	oname := "mr-out-" + strconv.Itoa(reduceTask.id)
+	oname := "mr-out-" + strconv.Itoa(reduceTask.Id)
 	ofile, _ := os.Create(oname)
 
 	i := 0
@@ -222,42 +233,41 @@ func executeReduce(reduceTask ReduceTask, reducef func(string, []string) string)
 	ofile.Close()
 
 	// Report reduce task completion
-	err = call(cSock, "Coordinator.ReportCompletedReduceTask", &struct{}{}, &struct{}{})
+	err = RPCall(cSock, "Coordinator.ReportCompletedReduceTask", &struct{}{}, &struct{}{})
+	// fmt.Println("Reduce Worker Finished:", reduceTask.Id)
 
 	// If the rpc fails we are cooked
 	if err != nil {
-		log.Fatalf("Error informing reduce task completion to coordinator")
+		log.Fatalln("Error informing reduce task completion to coordinator:", err)
 	}
 }
 
 // Fetch intermediate data from worker
-func (r *ReduceWorker) getIntermediate(sock, filename string) error {
+func (r *ReduceWorker) getIntermediate(sock, filename string) {
 	// Connect to map worker and read file
 	contentReply := Content{}
 	filenameArg := Filename{filename}
-	err := call(sock, "Worker.GetFile", &filenameArg, &contentReply)
+	err := RPCall(sock, "WorkerServer.GetFile", &filenameArg, &contentReply)
 
 	if err != nil {
 		// Worker failure, just give up, I dont want to deal with this
-		log.Fatalln("Failure getting intermediate file from worker.")
+		log.Fatalln("Failure getting intermediate file from worker:", err)
 	}
 
 	// Save content in reduce worker struct
 	m.Lock()
-	_, err = r.file.Write(contentReply.content)
+	_, err = r.file.Write(contentReply.Content)
 	if err != nil {
-		log.Fatalln("Error writing to reduce input file")
+		log.Fatalln("Error writing to reduce input file:", err)
 	}
 	m.Unlock()
 	wg.Done()
-
-	return nil
 }
 
 // Recieve location of map files
 func (r *ReduceWorker) SendMapIntermediate(args *IFile, reply *struct{}) error {
 	// Get intermediate content
-	r.getIntermediate(args.sock, args.filename)
+	r.getIntermediate(args.Sock, args.Filename)
 	return nil
 }
 
@@ -268,47 +278,60 @@ func (w *WorkerServer) GetFile(args *Filename, reply *Content) error {
 	// With that assumption we can run the server concurrently with no locks
 
 	// Read file contents
-	file, err := os.Open(args.filename)
+	file, err := os.Open(args.Filename)
 	if err != nil {
-		log.Fatalf("cannot open %v", args.filename)
+		log.Fatalf("cannot open %v: %v\n", args.Filename, err)
 	}
 	content, err := io.ReadAll(file)
 	file.Close()
 
 	if err != nil {
-		log.Fatalf("cannot read %v", args.filename)
+		log.Fatalf("cannot read %v: %v\n", args.Filename, err)
 	}
 
 	// Send data
-	reply.content = content
+	reply.Content = content
 
 	return nil
 }
 
-// start a thread that listens for RPCs from worker.go
+// Start a thread to listen for coordinator messages for map intermediate locations
 func (r *ReduceWorker) server() {
-	rpc.Register(r)
-	rpc.HandleHTTP()
-	//l, e := net.Listen("tcp", ":1234")
-	sockname := workerSock()
+	server := rpc.NewServer()
+	server.Register(r)
+
+	// Create a new ServeMux for this server
+	mux := http.NewServeMux()
+	mux.Handle("/_goRPC_", server)
+
+	sockname := ReduceSock()
 	os.Remove(sockname)
 	l, e := net.Listen("unix", sockname)
 	if e != nil {
-		log.Fatal("listen error:", e)
+		log.Fatalln("listen error:", e)
 	}
-	go http.Serve(l, nil)
+	r.listener = &l
+
+	go http.Serve(l, mux)
 }
 
-// Start the worker server that listens for file transfer requests from reduce tasks
+func (r *ReduceWorker) close() {
+	(*r.listener).Close()
+}
+
+// Start a thread to listen for intermediate file transfer requests for reduce tasks
 func (w *WorkerServer) server() {
-	rpc.Register(w)
-	rpc.HandleHTTP()
-	//l, e := net.Listen("tcp", ":1234")
-	sockname := workerSock()
+	server := rpc.NewServer()
+	server.Register(w)
+
+	mux := http.NewServeMux()
+	mux.Handle("/_goRPC_", server)
+
+	sockname := WorkerSock()
 	os.Remove(sockname)
 	l, e := net.Listen("unix", sockname)
 	if e != nil {
-		log.Fatal("listen error:", e)
+		log.Fatalln("listen error:", e)
 	}
-	go http.Serve(l, nil)
+	go http.Serve(l, mux)
 }

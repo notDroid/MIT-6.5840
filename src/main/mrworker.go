@@ -27,7 +27,7 @@ func main() {
 
 	mapf, reducef := loadPlugin(os.Args[1])
 
-	fmt.Println("Worker started") // ----------------------------------------------------- TEMPORARY COMMENT ----------------------------------------
+	// fmt.Println("Worker started")
 	mr.Worker(mapf, reducef)
 }
 

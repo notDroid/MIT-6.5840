@@ -12,20 +12,20 @@ import (
 
 type Coordinator struct {
 	// Tracking and assigning map tasks
-	M          int              // Total number of map tasks to be processed
-	nMap       int              // Number of map tasks assigned
-	mapFiles   []string         // List of map input file names
-	mapSocks   map[int]string   // Map from map worker ids to their sockets
-	mapIdsLeft map[int]struct{} // Map ids left set
+	M            int              // Total number of map tasks to be processed
+	nMap         int              // Number of map tasks assigned
+	mapFiles     []string         // List of map input file names
+	mapSocksById map[int]string   // Map from map worker ids to their sockets
+	mapIdsLeft   map[int]struct{} // Map ids left set
 
 	// Tracking completed map tasks
 	mapIFiles map[int][]string // Map results, intermediate file names
 
 	// Tracking and assigning reduce tasks
-	R             int              // Total number of reduce tasks
-	nReduce       int              // number of reduce tasks assigned
-	reduceIds     map[int]string   // Map from reduce worker ids to their sockets
-	reduceIdsLeft map[int]struct{} // Reduce ids left set
+	R               int              // Total number of reduce tasks
+	nReduce         int              // number of reduce tasks assigned
+	reduceSocksById map[int]string   // Map from reduce worker ids to their sockets
+	reduceIdsLeft   map[int]struct{} // Reduce ids left set
 
 	nDone int // Number of completed reduce tasks
 }
@@ -41,11 +41,11 @@ func (c *Coordinator) GetTask(args *Identifier, reply *TaskReply) error {
 	defer cm.Unlock()
 
 	// If map tasks remaining assign map
-	if c.nMap > 0 {
+	if c.nMap < c.M {
 		// Assign Map
-		c.nMap -= 1
-		reply.task = "map"
-		reply.mapTask.R = c.R
+		c.nMap += 1
+		reply.Task = "map"
+		reply.MapTask.R = c.R
 
 		// Grab a remaining map id
 		var mId int
@@ -53,17 +53,19 @@ func (c *Coordinator) GetTask(args *Identifier, reply *TaskReply) error {
 			mId = key
 			break
 		}
-		reply.mapTask.id = mId
-		c.mapSocks[mId] = args.sock
+		delete(c.mapIdsLeft, mId)
+
+		reply.MapTask.Id = mId
+		c.mapSocksById[mId] = args.Sock
 
 		// Get and send filename
-		filename := c.mapFiles[c.nMap]
-		reply.mapTask.filename = filename
+		filename := c.mapFiles[mId]
+		reply.MapTask.Filename = filename
 	} else if c.nReduce < c.R {
 		// Assign reduce task
 		c.nReduce += 1
-		reply.task = "reduce"
-		reply.reduceTask.M = c.M
+		reply.Task = "reduce"
+		reply.ReduceTask.M = c.M
 
 		// Grab a remaining reduce id
 		var rId int
@@ -71,19 +73,22 @@ func (c *Coordinator) GetTask(args *Identifier, reply *TaskReply) error {
 			rId = key
 			break
 		}
-		reply.reduceTask.id = rId
-		c.reduceIds[rId] = args.sock
+		delete(c.reduceIdsLeft, rId)
+
+		reply.ReduceTask.Id = rId
+		c.reduceSocksById[rId] = args.Sock
 
 		// Send map worker locations
+		reply.ReduceTask.IFiles = make(map[int]IFile)
 		for mId, filenames := range c.mapIFiles {
 			iFile := IFile{
-				sock:     c.mapSocks[mId],
-				filename: filenames[mId],
+				Sock:     c.mapSocksById[mId],
+				Filename: filenames[rId],
 			}
-			reply.reduceTask.iFiles[mId] = iFile
+			reply.ReduceTask.IFiles[mId] = iFile
 		}
 	} else {
-		reply.task = "none"
+		reply.Task = "none"
 	}
 
 	return nil
@@ -93,29 +98,30 @@ func (c *Coordinator) GetTask(args *Identifier, reply *TaskReply) error {
 func (c *Coordinator) ReportCompletedMapTask(args *MapIntermediate, reply *struct{}) error {
 	cm.Lock()
 	defer cm.Unlock()
+	// fmt.Println("Map Worker Finished:", args.Id)
 
 	// Get file locations
-	c.mapIFiles[args.id] = args.iFiles
+	c.mapIFiles[args.Id] = args.IFiles
 
 	// Broadcast locations to reduce workers
-	for rId, rSock := range c.reduceIds {
+	for rId, rSock := range c.reduceSocksById {
 		reduceArgs := IFile{
-			sock:     c.mapSocks[args.id],
-			filename: args.iFiles[rId],
+			Sock:     c.mapSocksById[args.Id],
+			Filename: args.IFiles[rId],
 		}
-		err := call(rSock, "ReduceWorker.SendMapIntermediate", &reduceArgs, &struct{}{})
+		err := RPCall(rSock, "ReduceWorker.SendMapIntermediate", &reduceArgs, &struct{}{})
 
 		// There is a race condition where the reduce worker hasn't setup its http server before the coordinator sends the intermediate locations
 		// As a solution we can wait 1 second and retry
 		if err != nil {
 			time.Sleep(time.Second)
-			err = call(rSock, "ReduceWorker.SendMapIntermediate", &reduceArgs, &struct{}{})
+			err = RPCall(rSock, "ReduceWorker.SendMapIntermediate", &reduceArgs, &struct{}{})
 
 			// If the reduce worker doesn't respond, assume its dead
 			if err != nil {
 				// Remove the reduce task from the active set and add it to the reduce tasks left set
 				c.nReduce -= 1
-				delete(c.reduceIds, rId)
+				delete(c.reduceSocksById, rId)
 				c.reduceIdsLeft[rId] = struct{}{}
 			}
 		}
@@ -137,7 +143,7 @@ func (c *Coordinator) server() {
 	rpc.Register(c)
 	rpc.HandleHTTP()
 	//l, e := net.Listen("tcp", ":1234")
-	sockname := coordinatorSock()
+	sockname := CoordinatorSock()
 	os.Remove(sockname)
 	l, e := net.Listen("unix", sockname)
 	if e != nil {
@@ -171,10 +177,16 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 
 	// Intialize coordinator
 	c := Coordinator{
-		M:             len(files),
-		mapIdsLeft:    mapIdsLeft,
-		R:             nReduce,
-		reduceIdsLeft: reduceIdsLeft,
+		M:            len(files),
+		mapIdsLeft:   mapIdsLeft,
+		mapFiles:     files,
+		mapSocksById: make(map[int]string),
+
+		mapIFiles: make(map[int][]string),
+
+		R:               nReduce,
+		reduceIdsLeft:   reduceIdsLeft,
+		reduceSocksById: make(map[int]string),
 	}
 
 	// Start server
