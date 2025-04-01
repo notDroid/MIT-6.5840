@@ -1,31 +1,33 @@
 package mr
 
 import (
-	"io"
 	"log"
 	"net"
 	"net/http"
 	"net/rpc"
 	"os"
 	"sync"
+	"time"
 )
 
 type Coordinator struct {
 	// Tracking and assigning map tasks
-	M          int              // total number of map tasks to be processed
-	nMap       int              // number of active map tasks
-	mapFiles   []string         // list of map input file names
+	M          int              // Total number of map tasks to be processed
+	nMap       int              // Number of map tasks assigned
+	mapFiles   []string         // List of map input file names
 	mapSocks   map[int]string   // Map from map worker ids to their sockets
 	mapIdsLeft map[int]struct{} // Map ids left set
 
 	// Tracking completed map tasks
-	mapIFiles map[int][]string // map results, intermediate file names
+	mapIFiles map[int][]string // Map results, intermediate file names
 
 	// Tracking and assigning reduce tasks
-	R             int              // total number of reduce tasks
-	nReduce       int              // number of active reduce tasks
+	R             int              // Total number of reduce tasks
+	nReduce       int              // number of reduce tasks assigned
 	reduceIds     map[int]string   // Map from reduce worker ids to their sockets
 	reduceIdsLeft map[int]struct{} // Reduce ids left set
+
+	nDone int // Number of completed reduce tasks
 }
 
 var cm = sync.Mutex{}
@@ -51,26 +53,12 @@ func (c *Coordinator) GetTask(args *Identifier, reply *TaskReply) error {
 			mId = key
 			break
 		}
+		reply.mapTask.id = mId
 		c.mapSocks[mId] = args.sock
 
 		// Get and send filename
 		filename := c.mapFiles[c.nMap]
 		reply.mapTask.filename = filename
-
-		// Read file contents
-		file, err := os.Open(filename)
-		if err != nil {
-			log.Fatalf("cannot open %v", filename)
-		}
-		contents, err := io.ReadAll(file)
-		file.Close()
-		if err != nil {
-			log.Fatalf("cannot read %v", filename)
-		}
-
-		// Send file contents
-		reply.mapTask.contents = string(contents)
-
 	} else if c.nReduce < c.R {
 		// Assign reduce task
 		c.nReduce += 1
@@ -94,13 +82,15 @@ func (c *Coordinator) GetTask(args *Identifier, reply *TaskReply) error {
 			}
 			reply.reduceTask.iFiles[mId] = iFile
 		}
+	} else {
+		reply.task = "none"
 	}
 
 	return nil
 }
 
 // Map task must report locations of files on local disk, so that reduce f
-func (c *Coordinator) ReportCompletedTask(args *MapIntermediate, reply *struct{}) error {
+func (c *Coordinator) ReportCompletedMapTask(args *MapIntermediate, reply *struct{}) error {
 	cm.Lock()
 	defer cm.Unlock()
 
@@ -109,17 +99,36 @@ func (c *Coordinator) ReportCompletedTask(args *MapIntermediate, reply *struct{}
 
 	// Broadcast locations to reduce workers
 	for rId, rSock := range c.reduceIds {
-		ok := call(rSock, "ReduceWorker.SendMapIntermediate", args.iFiles[rId], struct{}{})
+		reduceArgs := IFile{
+			sock:     c.mapSocks[args.id],
+			filename: args.iFiles[rId],
+		}
+		err := call(rSock, "ReduceWorker.SendMapIntermediate", &reduceArgs, &struct{}{})
 
-		// If the reduce worker doesn't respond, assume its dead
-		if !ok {
-			// Remove the reduce task from the active set and add it to the reduce tasks left set
-			c.nReduce -= 1
-			delete(c.reduceIds, rId)
-			c.reduceIdsLeft[rId] = struct{}{}
+		// There is a race condition where the reduce worker hasn't setup its http server before the coordinator sends the intermediate locations
+		// As a solution we can wait 1 second and retry
+		if err != nil {
+			time.Sleep(time.Second)
+			err = call(rSock, "ReduceWorker.SendMapIntermediate", &reduceArgs, &struct{}{})
+
+			// If the reduce worker doesn't respond, assume its dead
+			if err != nil {
+				// Remove the reduce task from the active set and add it to the reduce tasks left set
+				c.nReduce -= 1
+				delete(c.reduceIds, rId)
+				c.reduceIdsLeft[rId] = struct{}{}
+			}
 		}
 	}
 
+	return nil
+}
+
+// Map task must report locations of files on local disk, so that reduce f
+func (c *Coordinator) ReportCompletedReduceTask(args *struct{}, reply *struct{}) error {
+	cm.Lock()
+	c.nDone += 1
+	cm.Unlock()
 	return nil
 }
 
@@ -140,8 +149,9 @@ func (c *Coordinator) server() {
 // main/mrcoordinator.go calls Done() periodically to find out
 // if the entire job has finished.
 func (c *Coordinator) Done() bool {
-	ret := false
-
+	cm.Lock()
+	ret := c.nDone == c.R
+	cm.Unlock()
 	return ret
 }
 
@@ -149,8 +159,25 @@ func (c *Coordinator) Done() bool {
 // main/mrcoordinator.go calls this function.
 // nReduce is the number of reduce tasks to use.
 func MakeCoordinator(files []string, nReduce int) *Coordinator {
-	c := Coordinator{}
+	// Initialize ids left sets
+	mapIdsLeft := map[int]struct{}{}
+	for id := range len(files) {
+		mapIdsLeft[id] = struct{}{}
+	}
+	reduceIdsLeft := map[int]struct{}{}
+	for id := range nReduce {
+		reduceIdsLeft[id] = struct{}{}
+	}
 
+	// Intialize coordinator
+	c := Coordinator{
+		M:             len(files),
+		mapIdsLeft:    mapIdsLeft,
+		R:             nReduce,
+		reduceIdsLeft: reduceIdsLeft,
+	}
+
+	// Start server
 	c.server()
 	return &c
 }
