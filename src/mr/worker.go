@@ -63,19 +63,23 @@ func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string)
 
 	// Poll until task assigned
 	for {
-		err := call(cSock, "Coordinater.GetTask", &args, &reply)
+		err := call(cSock, "Coordinator.GetTask", &args, &reply)
 
 		// Coordinator didn't respond, assume its done
 		if err != nil {
+			fmt.Println("Coordinator didn't respond, giving up") // ----------------------------------------------------- TEMPORARY COMMENT ----------------------------------------
 			return
 		}
 
 		// If we get a map or reduce task, execute it
 		if reply.task == "map" {
+			fmt.Println("Worker recieved map task") // ----------------------------------------------------- TEMPORARY COMMENT ----------------------------------------
 			executeMap(reply.mapTask, mapf)
 		} else if reply.task == "reduce" {
+			fmt.Println("Worker recieved reduce task") // ----------------------------------------------------- TEMPORARY COMMENT ----------------------------------------
 			executeReduce(reply.reduceTask, reducef)
 		} else {
+			fmt.Println("Worker didn't recieve task") // ----------------------------------------------------- TEMPORARY COMMENT ----------------------------------------
 			time.Sleep(time.Second)
 		}
 	}
