@@ -43,6 +43,7 @@ type ReduceTask struct {
 
 type MapIntermediate struct {
 	Id     int
+	Sock   string
 	IFiles []string
 }
 
@@ -52,6 +53,11 @@ type Filename struct {
 
 type Content struct {
 	Content []byte
+}
+
+type ReduceIdentifier struct {
+	Id   int
+	Sock string
 }
 
 // Cook up a unique-ish UNIX-domain socket name

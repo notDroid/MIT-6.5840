@@ -47,6 +47,7 @@ func ihash(key string) int {
 }
 
 var cSock = CoordinatorSock() // Runtime constant
+var wSock = WorkerSock()      // Runtime constant, as long as we start execution from entry point mrworker.go entry point
 var m = sync.Mutex{}          // Worker mutex
 var wg = sync.WaitGroup{}     // Reduce wait for all map files
 
@@ -55,9 +56,6 @@ func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string)
 	// Set up file request server
 	w := WorkerServer{}
 	w.server()
-
-	// Set up Coordinator RPC
-	wSock := WorkerSock()
 
 	// Poll until task assigned
 	for {
@@ -73,13 +71,13 @@ func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string)
 
 		// If we get a map or reduce task, execute it
 		if reply.Task == "map" {
-			// fmt.Println("Worker recieved map task:", reply.MapTask.Id)
+			fmt.Println("Worker recieved map task:", reply.MapTask.Id)
 			executeMap(reply.MapTask, mapf)
 		} else if reply.Task == "reduce" {
-			// fmt.Println("Worker recieved reduce task")
+			fmt.Println("Worker recieved reduce task")
 			executeReduce(reply.ReduceTask, reducef)
 		} else {
-			// fmt.Println("Worker didn't recieve task")
+			fmt.Println("Worker didn't recieve task")
 			time.Sleep(time.Second)
 		}
 	}
@@ -129,6 +127,7 @@ func executeMap(mapTask MapTask, mapf func(string, string) []KeyValue) {
 	// Report completion with intermediate locations
 	args := MapIntermediate{
 		Id:     mapTask.Id,
+		Sock:   wSock,
 		IFiles: iFiles,
 	}
 
@@ -233,7 +232,11 @@ func executeReduce(reduceTask ReduceTask, reducef func(string, []string) string)
 	ofile.Close()
 
 	// Report reduce task completion
-	err = RPCall(cSock, "Coordinator.ReportCompletedReduceTask", &struct{}{}, &struct{}{})
+	reduceIdentifier := ReduceIdentifier{
+		Id:   reduceTask.Id,
+		Sock: wSock,
+	}
+	err = RPCall(cSock, "Coordinator.ReportCompletedReduceTask", &reduceIdentifier, &struct{}{})
 	// fmt.Println("Reduce Worker Finished:", reduceTask.Id)
 
 	// If the rpc fails we are cooked

@@ -23,7 +23,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	fmt.Println("Starting MapReduce coordinator") // ----------------------------------------------------- TEMPORARY COMMENT ----------------------------------------
+	// fmt.Println("Starting MapReduce coordinator")
 	m := mr.MakeCoordinator(os.Args[1:], 10)
 	for m.Done() == false {
 		time.Sleep(time.Second)
