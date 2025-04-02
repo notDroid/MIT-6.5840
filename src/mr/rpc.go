@@ -23,6 +23,12 @@ type IFile struct {
 	Filename string
 }
 
+type MIFile struct {
+	Id       int
+	Sock     string
+	Filename string
+}
+
 type TaskReply struct {
 	Task       string
 	MapTask    MapTask
@@ -58,6 +64,12 @@ type Content struct {
 type ReduceIdentifier struct {
 	Id   int
 	Sock string
+}
+
+type ReduceInvalidRequest struct {
+	RId  int
+	Sock string
+	MId  int
 }
 
 // Cook up a unique-ish UNIX-domain socket name

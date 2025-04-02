@@ -104,7 +104,7 @@ func (c *Coordinator) ReportCompletedMapTask(args *MapIntermediate, reply *struc
 	cm.Lock()
 	defer cm.Unlock()
 	// Only accept completions from valid tasks
-	if _, inProgesss := c.mapTimes[args.Id]; !inProgesss || c.mapSocksById[args.Id] != args.Sock {
+	if !c.isValidMap(args.Id, args.Sock) {
 		return nil
 	}
 
@@ -117,7 +117,8 @@ func (c *Coordinator) ReportCompletedMapTask(args *MapIntermediate, reply *struc
 	// Broadcast locations to reduce workers
 	invalidIds := []int{}
 	for rId, rSock := range c.reduceSocksById {
-		reduceArgs := IFile{
+		reduceArgs := MIFile{
+			Id:       args.Id,
 			Sock:     c.mapSocksById[args.Id],
 			Filename: args.IFiles[rId],
 		}
@@ -150,13 +151,18 @@ func (c *Coordinator) ReportCompletedReduceTask(args *ReduceIdentifier, reply *s
 	cm.Lock()
 	defer cm.Unlock()
 	// Ignore if invalidated
-	if _, inProgesss := c.reduceTimes[args.Id]; !inProgesss || c.reduceSocksById[args.Id] != args.Sock {
+	if !c.isValidReduce(args.Id, args.Sock) {
 		return nil
 	}
 	fmt.Println("Reduce Worker Finished:", args.Id)
 
 	c.nDone += 1
 	return nil
+}
+
+// Invalidate map task
+func (c *Coordinator) ReportInvalid(args *ReduceInvalidRequest, reply *struct{}) {
+	// Only accept
 }
 
 // start a thread that listens for RPCs from worker.go
@@ -269,4 +275,18 @@ func (c *Coordinator) invalidateReduce(id int) {
 	c.nReduce -= 1
 	delete(c.reduceSocksById, id)
 	delete(c.reduceTimes, id)
+}
+
+func (c *Coordinator) isValidMap(id int, sock string) bool {
+	if _, inProgesss := c.mapTimes[id]; !inProgesss || c.mapSocksById[id] != sock {
+		return false
+	}
+	return true
+}
+
+func (c *Coordinator) isValidReduce(id int, sock string) bool {
+	if _, inProgesss := c.reduceTimes[id]; !inProgesss || c.reduceSocksById[id] != sock {
+		return false
+	}
+	return true
 }

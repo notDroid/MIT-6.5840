@@ -34,6 +34,9 @@ type ReduceWorker struct {
 	filename string
 	file     *os.File
 	listener *net.Listener
+	readSet  map[int]struct{}
+	id       int
+	sock     string
 }
 
 type WorkerServer struct{}
@@ -168,13 +171,16 @@ func executeReduce(reduceTask ReduceTask, reducef func(string, []string) string)
 	r := ReduceWorker{
 		filename: filename,
 		file:     file,
+		readSet:  make(map[int]struct{}),
+		id:       reduceTask.Id,
+		sock:     ReduceSock(),
 	}
 	wg.Add(reduceTask.M) // Start server and wait
 	r.server()
 
 	// Request from all map tasks already finished
-	for _, iFile := range reduceTask.IFiles {
-		go r.getIntermediate(iFile.Sock, iFile.Filename)
+	for id, iFile := range reduceTask.IFiles {
+		go r.getIntermediate(id, iFile.Sock, iFile.Filename)
 	}
 
 	wg.Wait()
@@ -246,19 +252,33 @@ func executeReduce(reduceTask ReduceTask, reducef func(string, []string) string)
 }
 
 // Fetch intermediate data from worker
-func (r *ReduceWorker) getIntermediate(sock, filename string) {
+func (r *ReduceWorker) getIntermediate(id int, sock, filename string) {
 	// Connect to map worker and read file
 	contentReply := Content{}
 	filenameArg := Filename{filename}
 	err := RPCall(sock, "WorkerServer.GetFile", &filenameArg, &contentReply)
 
 	if err != nil {
-		// Worker failure, just give up, I dont want to deal with this
-		log.Fatalln("Failure getting intermediate file from worker:", err)
+		// Worker failure
+		log.Println("Failure getting intermediate file from worker:", err)
+
+		// Send invalidation request
+		invalidRequest := ReduceInvalidRequest{
+			RId:  r.id,
+			Sock: sock,
+			MId:  id,
+		}
+
+		err = RPCall(cSock, "Coordinator.ReportInvalid", &invalidRequest, &struct{}{})
+
+		if err != nil {
+			log.Fatalln("Error informing the coordinator about invalid map server:", err)
+		}
 	}
 
 	// Save content in reduce worker struct
 	m.Lock()
+	r.readSet[id] = struct{}{}
 	_, err = r.file.Write(contentReply.Content)
 	if err != nil {
 		log.Fatalln("Error writing to reduce input file:", err)
@@ -268,9 +288,9 @@ func (r *ReduceWorker) getIntermediate(sock, filename string) {
 }
 
 // Recieve location of map files
-func (r *ReduceWorker) SendMapIntermediate(args *IFile, reply *struct{}) error {
+func (r *ReduceWorker) SendMapIntermediate(args *MIFile, reply *struct{}) error {
 	// Get intermediate content
-	r.getIntermediate(args.Sock, args.Filename)
+	r.getIntermediate(args.Id, args.Sock, args.Filename)
 	return nil
 }
 
