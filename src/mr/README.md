@@ -10,7 +10,7 @@ If we have map tasks left, assign map.
 
 1. Worker determined by:
     * Unix socket (listening process)
-    * Real Distributed: location (ip), port (listening process)
+    * Real Distributed: location (ip), port (listening port for reduce worker, which is determined by pid)
 
 2. Assign map-id: 
     * Keep a set of map ids that need to be resolved.
@@ -18,7 +18,6 @@ If we have map tasks left, assign map.
 
 3. Send task info:
     * Filename
-    * Real Distributed: Server serving file + filename
   
 4. Execute map task:
     * Fetch input split.
@@ -34,13 +33,13 @@ If we have no more map tasks to assign, and reduce tasks left, assign reduce.
     * Take an id from the set.
   
 2. Send task info:
-    * Send intermediate file locations collected so far.
+    * Send ids of map tasks completed so far.
   
 3. Execute reduce task:
     * Start reduce server, fetch intermediate files from worker server, wait for more locations from coordinator.
-    * Keep a read set, if fetch is successful add to read set, otherwise report worker to coordinator.
+       * We don't want to wait indefinetly, add a timeout period.
     * Once all intermediate data is read, sort the data by key, assume partition fits in memory (do not external sort).
-    * Execute reduce function for each unique key in memory, write output to local disk.
+    * Execute reduce function for each unique key in memory.
     * Report completed reduce task to coordinator.
   
 ## Fault Tolerance
@@ -49,8 +48,12 @@ If we have no more map tasks to assign, and reduce tasks left, assign reduce.
 Map or reduce server failure before completion:
   1. **Timeout:** Every few seconds preform a check if map/reduce tasks have taken too long, invalidate them.
       * Keep track of task creation time.
-  2. **Pinging:** Don't use a more complex policy like asking the map task if its alive, with longer timeout period.
+  2. **Pinging:** We could also use a more complex policy like asking the map task if its alive, with longer timeout period.
 
-Invalidate in progress tasks:
+**Invalidate:**
   1. Add id back to map/reduce ids left set.
   2. Delete from in progress tasks map (which has start times).
+  3. If its a reduce task, tell it to stop its server if its still up.
+
+**Backup Tasks:**
+   * We could kind of implement backup tasks by allowing invalidated tasks to return valid results, this doesn't work for waiting reduce tasks though.
