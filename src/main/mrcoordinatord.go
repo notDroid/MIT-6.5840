@@ -30,6 +30,12 @@ func main() {
 		log.Fatalln("Error getting private ip:", err)
 	}
 	fmt.Println("Starting MapReduce coordinator:", ip)
+
+	// Send input files to s3
+	for _, filename := range os.Args[1:] {
+		mrd.LocalPathToS3(filename, "input/"+filename)
+	}
+
 	m := mrd.MakeCoordinator(os.Args[1:], 10)
 	for m.Done() == false {
 		time.Sleep(time.Second)
