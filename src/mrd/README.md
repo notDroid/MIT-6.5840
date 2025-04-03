@@ -8,6 +8,16 @@
 ### EC2
 Start free tier instances, one coordinator, multiple workers. Set up:
 ```
+sudo yum update -y
+sudo yum install git -y
+
+wget https://go.dev/dl/go1.24.2.linux-amd64.tar.gz
+sudo tar -C /usr/local -xzf go1.24.2.linux-amd64.tar.gz
+echo "export PATH=$PATH:/usr/local/go/bin" >> ~/.bashrc
+source ~/.bashrc
+
+sudo yum groupinstall "Development Tools"
+git clone https://github.com/notDroid/MIT-6.5840
 ```
 Start coordinator:
 ```
