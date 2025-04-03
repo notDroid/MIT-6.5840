@@ -3,6 +3,7 @@
 
 ### Processes:
 **Coordinator:** Starts with M (# map tasks) and R (# reduce tasks). Coordinator assigns and tracks map and reduce tasks.
+
 **Worker:** Polls coordinator for task to execute.
 
 ## Phase 1: Assign Map
