@@ -18,12 +18,19 @@ source ~/.bashrc
 
 sudo yum groupinstall "Development Tools"
 git clone https://github.com/notDroid/MIT-6.5840
+
+aws configure
+
+cd MIT-6.5840/src/main
 ```
 Start coordinator:
 ```
+go run mrcoordinatord.go pg-*.txt
 ```
 Start worker:
 ```
+go build -buildmode=plugin ../mrapps/wcd.go
+go run mrworkerd.go wcd.so 172.31.5.21:8000 &
 ```
 
 ## Phase 1: Assign Map
