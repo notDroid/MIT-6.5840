@@ -12,6 +12,7 @@ package main
 import (
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"time"
 
@@ -25,10 +26,20 @@ func main() {
 	}
 
 	// Get ip
-	ip, err := mrd.GetEC2PrivateIP()
+	// ip, err := mrd.GetEC2PrivateIP()
+	// if err != nil {
+	// 	log.Fatalln("Error getting private ip:", err)
+	// }
+
+	conn, err := net.Dial("udp", "8.8.8.8:80")
 	if err != nil {
-		log.Fatalln("Error getting private ip:", err)
+		log.Fatal(err)
 	}
+	defer conn.Close()
+
+	localAddr := conn.LocalAddr().(*net.UDPAddr)
+	ip := localAddr.IP.String()
+
 	fmt.Println("Starting MapReduce coordinator:", ip)
 
 	// Send input files to s3
