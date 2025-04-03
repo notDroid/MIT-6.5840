@@ -5,11 +5,8 @@ package mrd
 //
 
 import (
-	"fmt"
-	"io"
-	"net/http"
+	"net"
 	"net/rpc"
-	"time"
 )
 
 //
@@ -57,26 +54,14 @@ type MapId struct {
 
 // Get ip
 func GetEC2PrivateIP() (string, error) {
-	// Create an HTTP client with a timeout
-	client := &http.Client{
-		Timeout: 5 * time.Second,
-	}
-
-	// Make a request to the EC2 instance metadata service
-	resp, err := client.Get("http://169.254.169.254/latest/meta-data/local-ipv4")
+	conn, err := net.Dial("udp", "8.8.8.8:80")
 	if err != nil {
-		fmt.Printf("Error retrieving private IP: %v\n", err)
 		return "", err
 	}
-	defer resp.Body.Close()
+	defer conn.Close()
 
-	// Read the response body
-	privateIP, err := io.ReadAll(resp.Body)
-	if err != nil {
-		fmt.Printf("Error reading response: %v\n", err)
-		return "", err
-	}
-	return string(privateIP), nil
+	localAddr := conn.LocalAddr().(*net.UDPAddr)
+	return localAddr.IP.String(), nil
 }
 
 // send an RPC request, wait for the response.

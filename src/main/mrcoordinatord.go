@@ -12,7 +12,6 @@ package main
 import (
 	"fmt"
 	"log"
-	"net"
 	"os"
 	"time"
 
@@ -26,19 +25,10 @@ func main() {
 	}
 
 	// Get ip
-	// ip, err := mrd.GetEC2PrivateIP()
-	// if err != nil {
-	// 	log.Fatalln("Error getting private ip:", err)
-	// }
-
-	conn, err := net.Dial("udp", "8.8.8.8:80")
+	ip, err := mrd.GetEC2PrivateIP()
 	if err != nil {
-		log.Fatal(err)
+		log.Fatalln("Error getting private ip:", err)
 	}
-	defer conn.Close()
-
-	localAddr := conn.LocalAddr().(*net.UDPAddr)
-	ip := localAddr.IP.String()
 
 	fmt.Println("Starting MapReduce coordinator:", ip)
 
