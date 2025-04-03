@@ -85,7 +85,7 @@ func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string)
 			rm.Unlock()
 			executeMap(reply.MapTask, mapf)
 		} else if reply.Task == "reduce" {
-			fmt.Println("Worker recieved reduce task")
+			fmt.Println("Worker recieved reduce task:", reply.ReduceTask.RId)
 			// Unlock in execute reduce function
 			executeReduce(reply.ReduceTask, reducef)
 		} else {
