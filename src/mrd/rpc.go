@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/rpc"
+	"time"
 )
 
 //
@@ -56,20 +57,26 @@ type MapId struct {
 
 // Get ip
 func GetEC2PrivateIP() (string, error) {
-	// AWS metadata endpoint for private IP
-	const url = "http://169.254.169.254/latest/meta-data/local-ipv4"
-	resp, err := http.Get(url)
+	// Create an HTTP client with a timeout
+	client := &http.Client{
+		Timeout: 5 * time.Second,
+	}
+
+	// Make a request to the EC2 instance metadata service
+	resp, err := client.Get("http://169.254.169.254/latest/meta-data/local-ipv4")
 	if err != nil {
-		return "", fmt.Errorf("failed to fetch private IP: %v", err)
+		fmt.Printf("Error retrieving private IP: %v\n", err)
+		return "", err
 	}
 	defer resp.Body.Close()
 
-	ip, err := io.ReadAll(resp.Body)
+	// Read the response body
+	privateIP, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return "", fmt.Errorf("failed to read response: %v", err)
+		fmt.Printf("Error reading response: %v\n", err)
+		return "", err
 	}
-
-	return string(ip), nil
+	return string(privateIP), nil
 }
 
 // send an RPC request, wait for the response.
