@@ -1,4 +1,4 @@
-package mr
+package mr2
 
 import (
 	"fmt"
@@ -112,7 +112,7 @@ func (c *Coordinator) ReportCompletedMapTask(args *MapIntermediate, reply *struc
 			Sock:     args.Sock,
 			Filename: args.IFiles[rId],
 		}
-		err := RPCall(rSock, "ReduceWorker.SendMapIntermediate", &reduceArgs, &struct{}{})
+		err := RPCall(rSock, "WorkerServer.SendMapIntermediate", &reduceArgs, &struct{}{})
 
 		if err != nil {
 			fmt.Printf("Reduce Worker didn't respond %d: %v\n", rId, err)
@@ -140,6 +140,20 @@ func (c *Coordinator) ReportCompletedReduceTask(args *ReduceIdentifier, reply *s
 
 	delete(c.reduceTimes, args.RId) // Remove from in progress set
 	c.nDone += 1
+
+	return nil
+}
+
+// Invalidate map task
+func (c *Coordinator) ReportInvalid(args *ReduceInvalidRequest, reply *struct{}) error {
+	cm.Lock()
+	defer cm.Unlock()
+	// Only accept valid reduce tasks, and valid completed map tasks
+	if !c.isValidReduce(args.RId, args.RSock) || !c.isCompleteMap(args.MId, args.MSock) {
+		return nil
+	}
+	// Invalidate completed map
+	c.invalidateCompleteMap(args.MId)
 
 	return nil
 }
@@ -245,12 +259,14 @@ func (c *Coordinator) invalidateMap(id int) {
 	fmt.Println("Invalidate Map:", id)
 	c.mapIdsLeft[id] = struct{}{}
 	delete(c.mapTimes, id)
+	RPCall(c.mapSocks[id], "WorkerServer.PleaseExit", &struct{}{}, &struct{}{})
 }
 
 func (c *Coordinator) invalidateReduce(id int) {
 	fmt.Println("Invalidate Reduce:", id)
 	c.reduceIdsLeft[id] = struct{}{}
 	delete(c.reduceTimes, id)
+	RPCall(c.reduceSocks[id], "WorkerServer.PleaseExit", &struct{}{}, &struct{}{})
 }
 
 func (c *Coordinator) isValidMap(id int, sock string) bool {
@@ -285,4 +301,19 @@ func (c *Coordinator) fetchRId() int {
 	}
 	delete(c.reduceIdsLeft, rId)
 	return rId
+}
+
+func (c *Coordinator) isCompleteMap(id int, sock string) bool {
+	_, notAssigned := c.mapIdsLeft[id]
+	_, inProgress := c.mapTimes[id]
+	if notAssigned || inProgress || c.mapSocks[id] != sock {
+		return false
+	}
+	return true
+}
+
+func (c *Coordinator) invalidateCompleteMap(id int) {
+	fmt.Println("Invalidate Complete Map:", id)
+	c.mapIdsLeft[id] = struct{}{}
+	RPCall(c.mapSocks[id], "WorkerServer.PleaseExit", &struct{}{}, &struct{}{})
 }

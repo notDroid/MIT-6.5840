@@ -1,7 +1,8 @@
-package mr
+package mr2
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"hash/fnv"
 	"io"
@@ -33,13 +34,18 @@ func (a ByKey) Less(i, j int) bool { return a[i].Key < a[j].Key }
 // Handles getting intermediate data
 type ReduceWorker struct {
 	// Reduce metadata
-	rId       int
-	M         int
-	nRecieved int
+	rId     int
+	readSet map[int]struct{}
 
 	// Reduce input intermediate file
 	filename string
 	file     *os.File
+}
+
+// Handles providing data to reduce workers and redirecting coordinator communications to reduce worker
+type WorkerServer struct {
+	reduceActive bool
+	r            *ReduceWorker
 }
 
 // use ihash(key) % NReduce to choose the reduce
@@ -50,16 +56,17 @@ func ihash(key string) int {
 	return int(h.Sum32() & 0x7fffffff)
 }
 
+var wm = sync.Mutex{}         // Worker mutex
 var rm = sync.Mutex{}         // Reduce Worker mutex
 var wg = sync.WaitGroup{}     // Reduce wait for all map files
 var cSock = CoordinatorSock() // Coordinator location
 var wSock = WorkerSock()      // Our location
-var r = ReduceWorker{}
+var w = WorkerServer{reduceActive: false}
 
 // main/mrworker.go calls this function.
 func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string) string) {
 	// Set up file request server
-	r.server()
+	w.server()
 	fmt.Println("Worker Started")
 
 	// Poll until task assigned
@@ -69,19 +76,19 @@ func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string)
 
 		// In case of reduce task, we need to lock and set up the reduce server.
 		// Avoid race condition of coordinator sending intermediate file locations before worker is ready.
-		rm.Lock()
+		wm.Lock()
 		err := RPCall(cSock, "Coordinator.GetTask", &args, &reply)
 
 		// Coordinator didn't respond, assume its done
 		if err != nil {
 			// fmt.Println("Coordinator didn't respond, giving up:", err)
-			return
+			exit()
 		}
 
 		// If we get a map or reduce task, execute it
 		if reply.Task == "map" {
 			fmt.Println("Worker recieved map task:", reply.MapTask.MId)
-			rm.Unlock()
+			wm.Unlock()
 			executeMap(reply.MapTask, mapf)
 		} else if reply.Task == "reduce" {
 			fmt.Println("Worker recieved reduce task")
@@ -89,7 +96,7 @@ func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string)
 			executeReduce(reply.ReduceTask, reducef)
 		} else {
 			fmt.Println("Worker didn't recieve task")
-			rm.Unlock()
+			wm.Unlock()
 			time.Sleep(time.Second)
 		}
 	}
@@ -172,30 +179,22 @@ func executeReduce(reduceTask ReduceTask, reducef func(string, []string) string)
 	if err != nil {
 		log.Fatalf("Error creating reduce input file %v: %v\n", filename, err)
 	}
-	r = ReduceWorker{
-		rId: reduceTask.RId,
-		M:   reduceTask.M,
+	r := ReduceWorker{
+		rId:     reduceTask.RId,
+		readSet: make(map[int]struct{}),
 
 		filename: filename,
 		file:     file,
 	}
 	wg.Add(reduceTask.M)
-	rm.Unlock() // Server set up
+	r.server()
+	wm.Unlock() // Server set up
 
 	// Request from all map tasks already finished
-	for _, iFile := range reduceTask.IFiles {
-		go r.fetchIntermediate(iFile.Filename)
+	for id, iFile := range reduceTask.IFiles {
+		go r.getIntermediate(id, iFile.Sock, iFile.Filename)
 	}
 
-	// Timout timer
-	go func() {
-		time.Sleep(10 * time.Second)
-		rm.Lock()
-		if r.nRecieved < r.M {
-			os.Exit(1)
-		}
-		rm.Unlock()
-	}()
 	wg.Wait()
 
 	//
@@ -256,6 +255,9 @@ func executeReduce(reduceTask ReduceTask, reducef func(string, []string) string)
 	}
 
 	err = RPCall(cSock, "Coordinator.ReportCompletedReduceTask", &reduceIdentifier, &struct{}{})
+	wm.Lock() // Im pretty sure we don't need this lock
+	r.close() // Close the server
+	wm.Unlock()
 	// fmt.Println("Reduce Worker Finished:", reduceTask.Id)
 
 	// If the rpc fails we are cooked
@@ -264,42 +266,92 @@ func executeReduce(reduceTask ReduceTask, reducef func(string, []string) string)
 	}
 }
 
-// Fetch intermediate data
-func (r *ReduceWorker) fetchIntermediate(filename string) {
-	// Fetch content
-	file, err := os.Open(filename)
+// Fetch intermediate data from worker
+func (r *ReduceWorker) getIntermediate(mId int, sock, filename string) {
+	// Connect to map worker and read file
+	contentReply := Content{}
+	filenameArg := Filename{filename}
+	err := RPCall(sock, "WorkerServer.GetFile", &filenameArg, &contentReply)
+
 	if err != nil {
-		log.Printf("cannot open %v: %v\n", filename, err)
+		// Worker failure
+		log.Println("Failure getting intermediate file from worker:", err)
+
+		// Send invalidation request
+		invalidRequest := ReduceInvalidRequest{
+			RId:   r.rId,
+			RSock: wSock,
+			MId:   mId,
+			MSock: sock,
+		}
+
+		err = RPCall(cSock, "Coordinator.ReportInvalid", &invalidRequest, &struct{}{})
+
+		if err != nil {
+			log.Fatalln("Error informing the coordinator about invalid map server:", err)
+		}
 		return
 	}
-	content, err := io.ReadAll(file)
-	file.Close()
 
-	if err != nil {
-		log.Fatalln("Error reading from intermediate file:", err)
+	// Save content in reduce worker struct
+	rm.Lock()
+	// Check if we already got content because of concurrent requests
+	if _, read := r.readSet[mId]; read {
+		return
 	}
 
-	// Write to reduce input file
-	rm.Lock()
-	_, err = r.file.Write(content)
+	// Mark read
+	r.readSet[mId] = struct{}{}
+	_, err = r.file.Write(contentReply.Content)
 	if err != nil {
 		log.Fatalln("Error writing to reduce input file:", err)
 	}
-	r.nRecieved += 1
 	rm.Unlock()
 	wg.Done()
 }
 
 // Recieve location of map files
 func (r *ReduceWorker) SendMapIntermediate(args *MIFile, reply *struct{}) error {
+	// Only call get intermediate if we need the intermediate
+	rm.Lock()
+	if _, read := r.readSet[args.MId]; read {
+		return nil
+	}
+	rm.Unlock()
 	// Get intermediate content
-	r.fetchIntermediate(args.Filename)
+	r.getIntermediate(args.MId, args.Sock, args.Filename)
+	return nil
+}
+
+// Recieve location of map files
+func (w *WorkerServer) GetFile(args *Filename, reply *Content) error {
+	// Fetch content
+	// Assume all requests are valid: Reduce worker accesses only its completed intermediate file
+	// With that assumption we can run the server concurrently with no locks
+
+	// Read file contents
+	file, err := os.Open(args.Filename)
+	if err != nil {
+		log.Printf("cannot open %v: %v\n", args.Filename, err)
+		return err
+	}
+	content, err := io.ReadAll(file)
+	file.Close()
+
+	if err != nil {
+		log.Printf("cannot read %v: %v\n", args.Filename, err)
+		return err
+	}
+
+	// Send data
+	reply.Content = content
+
 	return nil
 }
 
 // Start a thread to listen for intermediate file transfer requests for reduce tasks
-func (r *ReduceWorker) server() {
-	rpc.Register(r)
+func (w *WorkerServer) server() {
+	rpc.Register(w)
 	rpc.HandleHTTP()
 
 	sockname := wSock
@@ -309,4 +361,39 @@ func (r *ReduceWorker) server() {
 		log.Fatalln("listen error:", e)
 	}
 	go http.Serve(l, nil)
+}
+
+// RPC wrapper for exit
+func (w *WorkerServer) PleaseExit(args *struct{}, reply *struct{}) {
+	exit()
+}
+
+// We exit the worker, files will no longer be served, active map/reduce task abadonded
+func exit() {
+	os.Remove(wSock) // Close socket
+	os.Exit(1)
+}
+
+// Worker server reduce wrappers
+func (w *WorkerServer) SendMapIntermediate(args *MIFile, reply *struct{}) error {
+	wm.Lock()
+	if !w.reduceActive {
+		fmt.Println("Race condition")
+		return errors.New("no reduce worker active")
+	}
+	wm.Unlock()
+
+	return w.r.SendMapIntermediate(args, reply)
+}
+
+// Open reduce server
+func (r *ReduceWorker) server() {
+	w.reduceActive = true
+	w.r = r
+}
+
+// Close reduce server
+func (r *ReduceWorker) close() {
+	w.reduceActive = false
+	w.r = nil
 }
