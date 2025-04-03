@@ -75,7 +75,7 @@ func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string)
 
 		// Coordinator didn't respond, assume its done
 		if err != nil {
-			// fmt.Println("Coordinator didn't respond, giving up:", err)
+			fmt.Println("Coordinator didn't respond, giving up:", err)
 			return
 		}
 
