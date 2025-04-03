@@ -6,7 +6,6 @@ import (
 	"net"
 	"net/http"
 	"net/rpc"
-	"os"
 	"sync"
 	"time"
 )
@@ -16,21 +15,18 @@ type Coordinator struct {
 	inputFiles []string // List of map input file names
 
 	// Tracking and assigning map tasks
-	M          int               // Total number of map tasks to be processed
-	mapIdsLeft map[int]struct{}  // Map ids left set
-	mapSocks   map[int]string    // Map from map worker ids to their sockets
-	mapTimes   map[int]time.Time // In progress map tasks
-
-	// Tracking completed map tasks
-	iFiles map[int][]string // Map results, intermediate file names
+	M            int               // Total number of map tasks to be processed
+	mapIdsLeft   map[int]struct{}  // Map ids left set
+	mapSocks     map[int]string    // Map from map worker ids to their sockets
+	mapTimes     map[int]time.Time // In progress map tasks
+	mapCompleted map[int]struct{}  // Completed map tasks
 
 	// Tracking and assigning reduce tasks
 	R             int               // Total number of reduce tasks
 	reduceIdsLeft map[int]struct{}  // Reduce ids left set
 	reduceSocks   map[int]string    // Map from reduce worker ids to their sockets
 	reduceTimes   map[int]time.Time // In progress reduce tasks
-
-	nDone int // Number of completed reduce tasks
+	nDone         int               // Number of completed reduce tasks
 }
 
 var cm = sync.Mutex{}
@@ -72,13 +68,9 @@ func (c *Coordinator) GetTask(args *WorkerIdentifier, reply *TaskReply) error {
 		reply.ReduceTask.RId = rId
 
 		// Send map worker locations
-		reply.ReduceTask.IFiles = make(map[int]IFile)
-		for mId, filenames := range c.iFiles {
-			iFile := IFile{
-				Sock:     c.mapSocks[mId],
-				Filename: filenames[rId],
-			}
-			reply.ReduceTask.IFiles[mId] = iFile
+		reply.ReduceTask.MIds = []int{}
+		for mId := range c.mapCompleted {
+			reply.ReduceTask.MIds = append(reply.ReduceTask.MIds, mId)
 		}
 
 	} else {
@@ -89,7 +81,7 @@ func (c *Coordinator) GetTask(args *WorkerIdentifier, reply *TaskReply) error {
 }
 
 // Map task must report locations of files on local disk, so that reduce f
-func (c *Coordinator) ReportCompletedMapTask(args *MapIntermediate, reply *struct{}) error {
+func (c *Coordinator) ReportCompletedMapTask(args *MapIdentifier, reply *struct{}) error {
 	cm.Lock()
 	defer cm.Unlock()
 	// Only accept completions from valid tasks
@@ -100,19 +92,15 @@ func (c *Coordinator) ReportCompletedMapTask(args *MapIntermediate, reply *struc
 	fmt.Println("Map Worker Finished:", args.MId)
 
 	// Get file locations
-	c.iFiles[args.MId] = args.IFiles
+	c.mapCompleted[args.MId] = struct{}{}
 	delete(c.mapTimes, args.MId) // Remove from in progress set
 
 	// Broadcast locations to reduce workers
 	invalidIds := []int{}
 	for rId, _ := range c.reduceTimes {
 		rSock := c.reduceSocks[rId]
-		reduceArgs := MIFile{
-			MId:      args.MId,
-			Sock:     args.Sock,
-			Filename: args.IFiles[rId],
-		}
-		err := RPCall(rSock, "WorkerServer.SendMapIntermediate", &reduceArgs, &struct{}{})
+		reduceArgs := MapId{args.MId}
+		err := RPCall(rSock, "ReduceWorker.SendMapIntermediate", &reduceArgs, &struct{}{})
 
 		if err != nil {
 			fmt.Printf("Reduce Worker didn't respond %d: %v\n", rId, err)
@@ -144,28 +132,12 @@ func (c *Coordinator) ReportCompletedReduceTask(args *ReduceIdentifier, reply *s
 	return nil
 }
 
-// Invalidate map task
-func (c *Coordinator) ReportInvalid(args *ReduceInvalidRequest, reply *struct{}) error {
-	cm.Lock()
-	defer cm.Unlock()
-	// Only accept valid reduce tasks, and valid completed map tasks
-	if !c.isValidReduce(args.RId, args.RSock) || !c.isCompleteMap(args.MId, args.MSock) {
-		return nil
-	}
-	// Invalidate completed map
-	c.invalidateCompleteMap(args.MId)
-
-	return nil
-}
-
 // start a thread that listens for RPCs from worker.go
 func (c *Coordinator) server() {
 	rpc.Register(c)
 	rpc.HandleHTTP()
-	//l, e := net.Listen("tcp", ":1234")
-	sockname := CoordinatorSock()
-	os.Remove(sockname)
-	l, e := net.Listen("unix", sockname)
+	l, e := net.Listen("tcp", ":8000")
+
 	if e != nil {
 		log.Fatal("listen error:", e)
 	}
@@ -198,12 +170,11 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	c := Coordinator{
 		inputFiles: files,
 
-		M:          len(files),
-		mapIdsLeft: mapIdsLeft,
-		mapSocks:   make(map[int]string),
-		mapTimes:   make(map[int]time.Time),
-
-		iFiles: make(map[int][]string),
+		M:            len(files),
+		mapIdsLeft:   mapIdsLeft,
+		mapSocks:     make(map[int]string),
+		mapTimes:     make(map[int]time.Time),
+		mapCompleted: make(map[int]struct{}),
 
 		R:             nReduce,
 		reduceIdsLeft: reduceIdsLeft,
@@ -259,14 +230,12 @@ func (c *Coordinator) invalidateMap(id int) {
 	fmt.Println("Invalidate Map:", id)
 	c.mapIdsLeft[id] = struct{}{}
 	delete(c.mapTimes, id)
-	RPCall(c.mapSocks[id], "WorkerServer.PleaseExit", &struct{}{}, &struct{}{})
 }
 
 func (c *Coordinator) invalidateReduce(id int) {
 	fmt.Println("Invalidate Reduce:", id)
 	c.reduceIdsLeft[id] = struct{}{}
 	delete(c.reduceTimes, id)
-	RPCall(c.reduceSocks[id], "WorkerServer.PleaseExit", &struct{}{}, &struct{}{})
 }
 
 func (c *Coordinator) isValidMap(id int, sock string) bool {
@@ -301,19 +270,4 @@ func (c *Coordinator) fetchRId() int {
 	}
 	delete(c.reduceIdsLeft, rId)
 	return rId
-}
-
-func (c *Coordinator) isCompleteMap(id int, sock string) bool {
-	_, notAssigned := c.mapIdsLeft[id]
-	_, inProgress := c.mapTimes[id]
-	if notAssigned || inProgress || c.mapSocks[id] != sock {
-		return false
-	}
-	return true
-}
-
-func (c *Coordinator) invalidateCompleteMap(id int) {
-	fmt.Println("Invalidate Complete Map:", id)
-	c.mapIdsLeft[id] = struct{}{}
-	RPCall(c.mapSocks[id], "WorkerServer.PleaseExit", &struct{}{}, &struct{}{})
 }

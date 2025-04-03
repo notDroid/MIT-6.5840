@@ -5,25 +5,32 @@ package mrd
 //
 
 import (
+	"fmt"
+	"io"
+	"net/http"
 	"net/rpc"
-	"os"
-	"strconv"
 )
 
 //
 // RPC struct definitions
 //
 
+// Identifiers
 type WorkerIdentifier struct {
 	Sock string
 }
 
-type MIFile struct {
-	MId      int
-	Sock     string
-	Filename string
+type MapIdentifier struct {
+	MId  int
+	Sock string
 }
 
+type ReduceIdentifier struct {
+	RId  int
+	Sock string
+}
+
+// Task information
 type TaskReply struct {
 	Task       string
 	MapTask    MapTask
@@ -37,42 +44,37 @@ type MapTask struct {
 }
 
 type ReduceTask struct {
-	M      int
-	RId    int
-	IFiles map[int]string
-}
-
-type MapIntermediate struct {
-	MId    int
-	Sock   string
-	IFiles []string
-}
-
-type Filename struct {
-	Filename string
-}
-
-type ReduceIdentifier struct {
+	M    int
 	RId  int
-	Sock string
+	MIds []int
 }
 
-// Use port 8000 for the coordinator
-func CoordinatorSock() string {
-	s := "" + ":8000"
-	return s
+// Map id, for intermediate broadcasting
+type MapId struct {
+	MId int
 }
 
-func WorkerSock() string {
-	s := "/var/tmp/5840-mr-"
-	s += strconv.Itoa(os.Getuid()) + "-" + strconv.Itoa(os.Getpid())
-	return s
+// Get ip
+func GetEC2PrivateIP() (string, error) {
+	// AWS metadata endpoint for private IP
+	const url = "http://169.254.169.254/latest/meta-data/local-ipv4"
+	resp, err := http.Get(url)
+	if err != nil {
+		return "", fmt.Errorf("failed to fetch private IP: %v", err)
+	}
+	defer resp.Body.Close()
+
+	ip, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("failed to read response: %v", err)
+	}
+
+	return string(ip), nil
 }
 
 // send an RPC request, wait for the response.
-func RPCall(sock string, rpcname string, args interface{}, reply interface{}) error {
-	c, err := rpc.DialHTTP("tcp", sock)
-	// c, err := rpc.DialHTTP("unix", sockname)
+func RPCall(sockname string, rpcname string, args interface{}, reply interface{}) error {
+	c, err := rpc.DialHTTP("tcp", sockname)
 	if err != nil {
 		return err
 	}
