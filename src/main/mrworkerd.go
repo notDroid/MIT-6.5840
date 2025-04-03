@@ -24,6 +24,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Usage: mrworker xxx.so map_ip_address\n")
 		os.Exit(1)
 	}
+	mrd.InitS3Config("mapreduce-wali", "us-east-2")
 
 	mapf, reducef := loadPlugin(os.Args[1])
 

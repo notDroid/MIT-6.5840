@@ -23,6 +23,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Usage: mrcoordinator inputfiles...\n")
 		os.Exit(1)
 	}
+	mrd.InitS3Config("mapreduce-wali", "us-east-2")
 
 	// Get ip
 	ip, err := mrd.GetEC2PrivateIP()
