@@ -34,7 +34,10 @@ func main() {
 
 	// Send input files to s3
 	for _, filename := range os.Args[1:] {
-		mrd.LocalPathToS3(filename, "input/"+filename)
+		err = mrd.LocalPathToS3(filename, "input/"+filename)
+		if err != nil {
+			log.Fatalf("Couldn't upload file to s3 %v: %v", filename, err)
+		}
 	}
 
 	m := mrd.MakeCoordinator(os.Args[1:], 10)
