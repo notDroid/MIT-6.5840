@@ -1,4 +1,4 @@
-package mr2
+package mrd
 
 //
 // RPC definitions.
