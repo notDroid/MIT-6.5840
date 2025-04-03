@@ -14,21 +14,22 @@ import (
 // RPC struct definitions
 //
 
+// Identifiers
 type WorkerIdentifier struct {
 	Sock string
 }
 
-type IFile struct {
-	Sock     string
-	Filename string
+type MapIdentifier struct {
+	MId  int
+	Sock string
 }
 
-type MIFile struct {
-	MId      int
-	Sock     string
-	Filename string
+type ReduceIdentifier struct {
+	RId  int
+	Sock string
 }
 
+// Task information
 type TaskReply struct {
 	Task       string
 	MapTask    MapTask
@@ -42,35 +43,14 @@ type MapTask struct {
 }
 
 type ReduceTask struct {
-	M      int
-	RId    int
-	IFiles map[int]IFile
-}
-
-type MapIntermediate struct {
-	MId    int
-	Sock   string
-	IFiles []string
-}
-
-type Filename struct {
-	Filename string
-}
-
-type Content struct {
-	Content []byte
-}
-
-type ReduceIdentifier struct {
+	M    int
 	RId  int
-	Sock string
+	MIds []int
 }
 
-type ReduceInvalidRequest struct {
-	RId   int
-	RSock string
-	MId   int
-	MSock string
+// Map id, for intermediate broadcasting
+type MapId struct {
+	MId int
 }
 
 // Cook up a unique-ish UNIX-domain socket name

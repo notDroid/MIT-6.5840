@@ -54,11 +54,3 @@ Map or reduce server failure before completion:
 Invalidate in progress tasks:
   1. Add id back to map/reduce ids left set.
   2. Delete from in progress tasks map (which has start times).
-
-### Completed Map Failure
-
-Each reduce task needs to read all map worker's partition. With workers failing after completion:
-  1. Reduce workers wait to get map locations, ignore ones they don't need, report ones they can't read.
-       * Its possible to read from 2 locations for the same file at once, so we need to check its in the read set before saving.
-  2. Many invalidation requests to an already invalid map worker.
-

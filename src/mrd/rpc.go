@@ -18,11 +18,6 @@ type WorkerIdentifier struct {
 	Sock string
 }
 
-type IFile struct {
-	Sock     string
-	Filename string
-}
-
 type MIFile struct {
 	MId      int
 	Sock     string
@@ -44,7 +39,7 @@ type MapTask struct {
 type ReduceTask struct {
 	M      int
 	RId    int
-	IFiles map[int]IFile
+	IFiles map[int]string
 }
 
 type MapIntermediate struct {
@@ -57,29 +52,14 @@ type Filename struct {
 	Filename string
 }
 
-type Content struct {
-	Content []byte
-}
-
 type ReduceIdentifier struct {
 	RId  int
 	Sock string
 }
 
-type ReduceInvalidRequest struct {
-	RId   int
-	RSock string
-	MId   int
-	MSock string
-}
-
-// Cook up a unique-ish UNIX-domain socket name
-// in /var/tmp, for the coordinator.
-// Can't use the current directory since
-// Athena AFS doesn't support UNIX-domain sockets.
+// Use port 8000 for the coordinator
 func CoordinatorSock() string {
-	s := "/var/tmp/5840-mr-"
-	s += strconv.Itoa(os.Getuid())
+	s := "" + ":8000"
 	return s
 }
 
@@ -90,9 +70,9 @@ func WorkerSock() string {
 }
 
 // send an RPC request, wait for the response.
-func RPCall(sockname string, rpcname string, args interface{}, reply interface{}) error {
-	// c, err := rpc.DialHTTP("tcp", "127.0.0.1"+":1234")
-	c, err := rpc.DialHTTP("unix", sockname)
+func RPCall(sock string, rpcname string, args interface{}, reply interface{}) error {
+	c, err := rpc.DialHTTP("tcp", sock)
+	// c, err := rpc.DialHTTP("unix", sockname)
 	if err != nil {
 		return err
 	}

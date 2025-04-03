@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"hash/fnv"
-	"io"
 	"log"
 	"net"
 	"net/http"
@@ -38,8 +37,7 @@ type ReduceWorker struct {
 	nRecieved int
 
 	// Reduce input intermediate file
-	filename string
-	file     *os.File
+	tmpFile *os.File
 }
 
 // use ihash(key) % NReduce to choose the reduce
@@ -102,20 +100,16 @@ func executeMap(mapTask MapTask, mapf func(string, string) []KeyValue) {
 	// ------------------ Store on local disk
 
 	// Create a file for every R worker
-	var iFiles []string
+	var tmpFiles []*os.File
 	var encoders []*json.Encoder
-	for i := range mapTask.R {
-		filename := "mr-"
-		filename += "mid-" + strconv.Itoa(mapTask.MId) + "-rid-" + strconv.Itoa(i) // Map id, reduce id pair
-		iFiles = append(iFiles, filename)
-
-		file, err := os.Create(filename)
+	for _ = range mapTask.R {
+		tmpFile, err := os.CreateTemp(".", "mr-*")
 		if err != nil {
-			log.Fatalf("Error creating intermediate file %v: %v\n", filename, err)
+			log.Fatalf("Error creating temporary intermediate file %v: %v\n", tmpFile.Name(), err)
 		}
-		defer file.Close()
+		tmpFiles = append(tmpFiles, tmpFile)
 
-		enc := json.NewEncoder(file)
+		enc := json.NewEncoder(tmpFile)
 		encoders = append(encoders, enc)
 	}
 
@@ -124,17 +118,22 @@ func executeMap(mapTask MapTask, mapf func(string, string) []KeyValue) {
 		rId := ihash(kv.Key) % mapTask.R
 		err := encoders[rId].Encode(&kv)
 		if err != nil {
-			log.Fatalln("Error creating intermediate file:", iFiles[rId])
+			log.Fatalln("Error writing intermediate temporary file:", tmpFiles[rId].Name())
 		}
+	}
+
+	// Atomic intermediate file creation by renaming
+	for rId, tmpFile := range tmpFiles {
+		filename := iFilename(mapTask.MId, rId)
+		atomicRename(tmpFile, filename)
 	}
 
 	// ------------------ Intermediate data stored
 
 	// Report completion with intermediate locations
-	args := MapIntermediate{
-		MId:    mapTask.MId,
-		Sock:   wSock,
-		IFiles: iFiles,
+	args := MapIdentifier{
+		MId:  mapTask.MId,
+		Sock: wSock,
 	}
 
 	err := RPCall(cSock, "Coordinator.ReportCompletedMapTask", &args, &struct{}{})
@@ -145,46 +144,30 @@ func executeMap(mapTask MapTask, mapf func(string, string) []KeyValue) {
 	}
 }
 
-// Fetch input map split, we rely on the assumption that a shared file system is used, normally we should have some connection here
-func fetchInputSplit(filename string) string {
-	// Read file contents
-	file, err := os.Open(filename)
-	if err != nil {
-		log.Fatalf("cannot open %v: %v\n", filename, err)
-	}
-	content, err := io.ReadAll(file)
-	file.Close()
-	if err != nil {
-		log.Fatalf("cannot read %v: %v\n", filename, err)
-	}
-
-	return string(content)
-}
-
 func executeReduce(reduceTask ReduceTask, reducef func(string, []string) string) {
 	//
 	// Collect all data for our partition
 	//
 
 	// SET UP REDUCE SERVER
-	filename := "mr-rid-" + strconv.Itoa(reduceTask.RId) // Reduce id
-	file, err := os.Create(filename)
+	tmpFile, err := os.CreateTemp("", "mr-*")
+	tmpName := tmpFile.Name()
 	if err != nil {
-		log.Fatalf("Error creating reduce input file %v: %v\n", filename, err)
+		log.Fatalf("Error creating reduce input file %v: %v\n", tmpName, err)
 	}
 	r = ReduceWorker{
 		rId: reduceTask.RId,
 		M:   reduceTask.M,
 
-		filename: filename,
-		file:     file,
+		tmpFile: tmpFile,
 	}
 	wg.Add(reduceTask.M)
 	rm.Unlock() // Server set up
 
 	// Request from all map tasks already finished
-	for _, iFile := range reduceTask.IFiles {
-		go r.fetchIntermediate(iFile.Filename)
+	for _, mId := range reduceTask.MIds {
+		filename := iFilename(mId, reduceTask.RId)
+		go r.fetchIntermediate(filename)
 	}
 
 	// Timout timer
@@ -203,14 +186,14 @@ func executeReduce(reduceTask ReduceTask, reducef func(string, []string) string)
 	//
 
 	// Reset the file cursor to the beginning
-	_, err = file.Seek(0, 0)
+	_, err = tmpFile.Seek(0, 0)
 	if err != nil {
 		log.Fatalln("Couldn't reset cursor in reduce input file", err)
 	}
 
 	// Read the data from the file, assume it all fits in memory.
 	intermediate := []KeyValue{}
-	dec := json.NewDecoder(file)
+	dec := json.NewDecoder(tmpFile)
 	for {
 		var kv KeyValue
 		if err = dec.Decode(&kv); err != nil {
@@ -218,7 +201,7 @@ func executeReduce(reduceTask ReduceTask, reducef func(string, []string) string)
 		}
 		intermediate = append(intermediate, kv)
 	}
-	file.Close()
+	tmpFile.Close()
 
 	// Sort data in memory. Do not use external sort.
 	sort.Sort(ByKey(intermediate))
@@ -227,8 +210,7 @@ func executeReduce(reduceTask ReduceTask, reducef func(string, []string) string)
 	// call Reduce on each distinct key in intermediate[],
 	// and print the result to mr-out-{reduce id}.
 	//
-	oname := "mr-out-" + strconv.Itoa(reduceTask.RId)
-	ofile, _ := os.Create(oname)
+	tmpFile, _ = os.CreateTemp(".", "mr-")
 
 	i := 0
 	for i < len(intermediate) {
@@ -243,11 +225,14 @@ func executeReduce(reduceTask ReduceTask, reducef func(string, []string) string)
 		output := reducef(intermediate[i].Key, values)
 
 		// this is the correct format for each line of Reduce output.
-		fmt.Fprintf(ofile, "%v %v\n", intermediate[i].Key, output)
+		fmt.Fprintf(tmpFile, "%v %v\n", intermediate[i].Key, output)
 
 		i = j
 	}
-	ofile.Close()
+
+	// Atomic rename output file
+	filename := rFilename(reduceTask.RId)
+	atomicRename(tmpFile, filename)
 
 	// Report reduce task completion
 	reduceIdentifier := ReduceIdentifier{
@@ -264,37 +249,42 @@ func executeReduce(reduceTask ReduceTask, reducef func(string, []string) string)
 	}
 }
 
+// Fetch input map split, we rely on the assumption that a shared file system is used, normally we should have some connection here
+func fetchInputSplit(filename string) string {
+	// Read file contents
+	content, err := os.ReadFile(filename)
+	if err != nil {
+		log.Fatalf("cannot read %v: %v\n", filename, err)
+	}
+
+	return string(content)
+}
+
+// Recieve location of map files
+func (r *ReduceWorker) SendMapIntermediate(args *MapId, reply *struct{}) error {
+	// Get intermediate content
+	filename := iFilename(args.MId, r.rId)
+	r.fetchIntermediate(filename)
+	return nil
+}
+
 // Fetch intermediate data
 func (r *ReduceWorker) fetchIntermediate(filename string) {
 	// Fetch content
-	file, err := os.Open(filename)
+	content, err := os.ReadFile(filename)
 	if err != nil {
-		log.Printf("cannot open %v: %v\n", filename, err)
+		log.Printf("Could not read intermediate %v: %v\n", filename, err)
 		return
 	}
-	content, err := io.ReadAll(file)
-	file.Close()
-
-	if err != nil {
-		log.Fatalln("Error reading from intermediate file:", err)
-	}
-
 	// Write to reduce input file
 	rm.Lock()
-	_, err = r.file.Write(content)
+	_, err = r.tmpFile.Write(content)
 	if err != nil {
 		log.Fatalln("Error writing to reduce input file:", err)
 	}
 	r.nRecieved += 1
 	rm.Unlock()
 	wg.Done()
-}
-
-// Recieve location of map files
-func (r *ReduceWorker) SendMapIntermediate(args *MIFile, reply *struct{}) error {
-	// Get intermediate content
-	r.fetchIntermediate(args.Filename)
-	return nil
 }
 
 // Start a thread to listen for intermediate file transfer requests for reduce tasks
@@ -309,4 +299,32 @@ func (r *ReduceWorker) server() {
 		log.Fatalln("listen error:", e)
 	}
 	go http.Serve(l, nil)
+}
+
+//
+// Utility functions
+//
+
+func iFilename(mId, rId int) string {
+	return "mr-mid-" + strconv.Itoa(mId) + "-rid-" + strconv.Itoa(rId) // Map id, reduce id pair
+}
+
+func rFilename(rId int) string {
+	return "mr-out-" + strconv.Itoa(rId)
+}
+
+// Rename temporary file to do an atomic file creation, never view incomplete data.
+func atomicRename(tmpFile *os.File, filename string) {
+	tmpName := tmpFile.Name()
+
+	// Ensure data is flushed to disk.
+	if err := tmpFile.Sync(); err != nil {
+		log.Fatalf("Error flushing intermediate temporary file %v: %v", tmpName, err)
+	}
+	tmpFile.Close()
+
+	// Atomically replace the target file with the temporary file.
+	if err := os.Rename(tmpName, filename); err != nil {
+		log.Fatalf("Error renaming intermediate temporary file %v: %v", tmpName, err)
+	}
 }

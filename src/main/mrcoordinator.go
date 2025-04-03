@@ -24,7 +24,6 @@ func main() {
 	}
 
 	// fmt.Println("Starting MapReduce coordinator")
-	fmt.Println(os.Hostname())
 	m := mr.MakeCoordinator(os.Args[1:], 10)
 	for m.Done() == false {
 		time.Sleep(time.Second)

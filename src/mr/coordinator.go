@@ -16,21 +16,18 @@ type Coordinator struct {
 	inputFiles []string // List of map input file names
 
 	// Tracking and assigning map tasks
-	M          int               // Total number of map tasks to be processed
-	mapIdsLeft map[int]struct{}  // Map ids left set
-	mapSocks   map[int]string    // Map from map worker ids to their sockets
-	mapTimes   map[int]time.Time // In progress map tasks
-
-	// Tracking completed map tasks
-	iFiles map[int][]string // Map results, intermediate file names
+	M            int               // Total number of map tasks to be processed
+	mapIdsLeft   map[int]struct{}  // Map ids left set
+	mapSocks     map[int]string    // Map from map worker ids to their sockets
+	mapTimes     map[int]time.Time // In progress map tasks
+	mapCompleted map[int]struct{}  // Completed map tasks
 
 	// Tracking and assigning reduce tasks
 	R             int               // Total number of reduce tasks
 	reduceIdsLeft map[int]struct{}  // Reduce ids left set
 	reduceSocks   map[int]string    // Map from reduce worker ids to their sockets
 	reduceTimes   map[int]time.Time // In progress reduce tasks
-
-	nDone int // Number of completed reduce tasks
+	nDone         int               // Number of completed reduce tasks
 }
 
 var cm = sync.Mutex{}
@@ -72,13 +69,9 @@ func (c *Coordinator) GetTask(args *WorkerIdentifier, reply *TaskReply) error {
 		reply.ReduceTask.RId = rId
 
 		// Send map worker locations
-		reply.ReduceTask.IFiles = make(map[int]IFile)
-		for mId, filenames := range c.iFiles {
-			iFile := IFile{
-				Sock:     c.mapSocks[mId],
-				Filename: filenames[rId],
-			}
-			reply.ReduceTask.IFiles[mId] = iFile
+		reply.ReduceTask.MIds = []int{}
+		for mId := range c.mapCompleted {
+			reply.ReduceTask.MIds = append(reply.ReduceTask.MIds, mId)
 		}
 
 	} else {
@@ -89,7 +82,7 @@ func (c *Coordinator) GetTask(args *WorkerIdentifier, reply *TaskReply) error {
 }
 
 // Map task must report locations of files on local disk, so that reduce f
-func (c *Coordinator) ReportCompletedMapTask(args *MapIntermediate, reply *struct{}) error {
+func (c *Coordinator) ReportCompletedMapTask(args *MapIdentifier, reply *struct{}) error {
 	cm.Lock()
 	defer cm.Unlock()
 	// Only accept completions from valid tasks
@@ -100,18 +93,14 @@ func (c *Coordinator) ReportCompletedMapTask(args *MapIntermediate, reply *struc
 	fmt.Println("Map Worker Finished:", args.MId)
 
 	// Get file locations
-	c.iFiles[args.MId] = args.IFiles
+	c.mapCompleted[args.MId] = struct{}{}
 	delete(c.mapTimes, args.MId) // Remove from in progress set
 
 	// Broadcast locations to reduce workers
 	invalidIds := []int{}
 	for rId, _ := range c.reduceTimes {
 		rSock := c.reduceSocks[rId]
-		reduceArgs := MIFile{
-			MId:      args.MId,
-			Sock:     args.Sock,
-			Filename: args.IFiles[rId],
-		}
+		reduceArgs := MapId{args.MId}
 		err := RPCall(rSock, "ReduceWorker.SendMapIntermediate", &reduceArgs, &struct{}{})
 
 		if err != nil {
@@ -184,12 +173,11 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	c := Coordinator{
 		inputFiles: files,
 
-		M:          len(files),
-		mapIdsLeft: mapIdsLeft,
-		mapSocks:   make(map[int]string),
-		mapTimes:   make(map[int]time.Time),
-
-		iFiles: make(map[int][]string),
+		M:            len(files),
+		mapIdsLeft:   mapIdsLeft,
+		mapSocks:     make(map[int]string),
+		mapTimes:     make(map[int]time.Time),
+		mapCompleted: make(map[int]struct{}),
 
 		R:             nReduce,
 		reduceIdsLeft: reduceIdsLeft,
