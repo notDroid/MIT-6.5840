@@ -27,10 +27,10 @@ Start coordinator:
 ```
 go run mrcoordinatord.go pg-*.txt
 ```
-Start worker:
+Start worker(s):
 ```
 go build -buildmode=plugin ../mrapps/wcd.go
-go run mrworkerd.go wcd.so 172.31.5.21:8000 &
+go run mrworkerd.go wcd.so <master-ip>:8000 &
 ```
 
 ## Phase 1: Assign Map
