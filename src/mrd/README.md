@@ -1,4 +1,4 @@
-# Map Reduce Implementation Explained
+# Distributed Map Reduce Implementation Explained
 <img width="735" alt="Screenshot 2025-04-02 at 1 10 33 AM" src="https://github.com/user-attachments/assets/59ed68b2-f42a-472c-bda3-2b041ed2c798" />
 
 ### Processes:
