@@ -1,5 +1,6 @@
 github.com/anishathalye/porcupine v1.0.0 h1:93eF6d26IMDky+G4h8FcLuYp1oO+no8a//I7asq/oKI=
 github.com/anishathalye/porcupine v1.0.0/go.mod h1:WM0SsFjWNl2Y4BqHr/E/ll2yY1GY1jqn+W7Z/84Zoog=
+github.com/anishathalye/porcupine v1.0.2 h1:cXMWjnN95KYsbZVTi9VmXj0ePs1w3ZJ82zWoXDy6WPE=
 github.com/anishathalye/porcupine v1.0.2/go.mod h1:WM0SsFjWNl2Y4BqHr/E/ll2yY1GY1jqn+W7Z/84Zoog=
 github.com/aws/aws-sdk-go v1.45.24 h1:TZx/CizkmCQn8Rtsb11iLYutEQVGK5PK9wAhwouELBo=
 github.com/aws/aws-sdk-go v1.45.24/go.mod h1:aVsgQcEevwlmQ7qHE9I3h+dtQgpqhFB+i8Phjh7fkwI=
