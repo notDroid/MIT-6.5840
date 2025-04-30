@@ -2,24 +2,25 @@ package rsm
 
 import (
 	"sync"
+	"time"
 
 	"6.5840/kvsrv1/rpc"
 	"6.5840/labrpc"
-	"6.5840/raft1"
+	raft "6.5840/raft1"
 	"6.5840/raftapi"
-	"6.5840/tester1"
-
+	tester "6.5840/tester1"
 )
 
 var useRaftStateMachine bool // to plug in another raft besided raft1
-
+const waitTime = 100 * time.Millisecond
 
 type Op struct {
-	// Your definitions here.
-	// Field names must start with capital letters,
-	// otherwise RPC will break.
 }
 
+type retWait struct {
+	successCh chan bool
+	ret       any
+}
 
 // A server (i.e., ../server.go) that wants to replicate itself calls
 // MakeRSM and must implement the StateMachine interface.  This
@@ -40,7 +41,10 @@ type RSM struct {
 	applyCh      chan raftapi.ApplyMsg
 	maxraftstate int // snapshot if log grows this big
 	sm           StateMachine
-	// Your definitions here.
+
+	ops      map[int]*retWait // index -> Op
+	term     int
+	isLeader bool
 }
 
 // servers[] contains the ports of the set of
@@ -62,12 +66,19 @@ func MakeRSM(servers []*labrpc.ClientEnd, me int, persister *tester.Persister, m
 	rsm := &RSM{
 		me:           me,
 		maxraftstate: maxraftstate,
-		applyCh:      make(chan raftapi.ApplyMsg),
+		applyCh:      make(chan raftapi.ApplyMsg, 100),
 		sm:           sm,
+
+		ops:      make(map[int]*retWait),
+		term:     0,
+		isLeader: false,
 	}
 	if !useRaftStateMachine {
 		rsm.rf = raft.Make(servers, me, persister, rsm.applyCh)
 	}
+
+	go rsm.HandleOps()
+
 	return rsm
 }
 
@@ -75,16 +86,113 @@ func (rsm *RSM) Raft() raftapi.Raft {
 	return rsm.rf
 }
 
+func (rsm *RSM) checkLeader(term int, isLeader bool) {
+	// Flush waiting
+	if term > rsm.term {
+		rsm.flushWaiting()
+		rsm.term = term
+		rsm.isLeader = false
+	}
+
+	// Strictly turn on isLeader (if isLeader)
+	if rsm.term == term && !rsm.isLeader {
+		rsm.isLeader = isLeader
+	}
+}
+
+func (rsm *RSM) HandleOps() {
+	for applyMsg := range rsm.applyCh {
+		// Apply operation
+		if applyMsg.SnapshotValid {
+			rsm.sm.Restore(applyMsg.Snapshot)
+			continue
+		}
+		// fmt.Printf("S%d: Applying command at index %d: %+v\n", rsm.me, applyMsg.CommandIndex, applyMsg.Command)
+		ret := rsm.sm.DoOp(applyMsg.Command)
+
+		// Provide return value if there are waiters
+		rsm.handleReturns(applyMsg.CommandIndex, ret)
+		// fmt.Printf("S%d: Finished applying command at index %d\n", rsm.me, applyMsg.CommandIndex)
+	}
+	// Release anyone still waiting
+	rsm.mu.Lock()
+	rsm.flushWaiting()
+	rsm.mu.Unlock()
+}
+
+func (rsm *RSM) handleReturns(index int, ret any) {
+	term, isLeader := rsm.Raft().GetState()
+	rsm.mu.Lock()
+	defer rsm.mu.Unlock()
+
+	// Check leader
+	rsm.checkLeader(term, isLeader)
+
+	// See if we have a waiting op to wake up
+	if op, exists := rsm.ops[index]; exists {
+		// Provide return, then wake it up
+		op.ret = ret
+		op.successCh <- true
+		delete(rsm.ops, index)
+	}
+}
+
+// Invalidate waiting Sumbits and reset waiting op map
+func (rsm *RSM) flushWaiting() {
+	// Report failure to waiting ops
+	for _, op := range rsm.ops {
+		op.successCh <- false
+	}
+	// Reset waiting ops list
+	rsm.ops = make(map[int]*retWait)
+}
 
 // Submit a command to Raft, and wait for it to be committed.  It
 // should return ErrWrongLeader if client should find new leader and
 // try again.
 func (rsm *RSM) Submit(req any) (rpc.Err, any) {
+	// Try to queue command
+	index, term, isLeader := rsm.Raft().Start(req)
 
-	// Submit creates an Op structure to run a command through Raft;
-	// for example: op := Op{Me: rsm.me, Id: id, Req: req}, where req
-	// is the argument to Submit and id is a unique id for the op.
+	rsm.mu.Lock()
+	// Check leader
+	rsm.checkLeader(term, isLeader)
+	if !rsm.isLeader {
+		rsm.mu.Unlock()
+		return rpc.ErrWrongLeader, nil
+	}
+	// fmt.Printf("S%d: Submit started for index %d, term %d, isLeader %t\n", rsm.me, index, term, isLeader)
 
-	// your code here
-	return rpc.ErrWrongLeader, nil // i'm dead, try another server.
+	// Add the op to the waiting group
+	op := retWait{successCh: make(chan bool, 1)}
+	rsm.ops[index] = &op
+	rsm.mu.Unlock()
+
+	// fmt.Printf("S%d: Submit waiting for op %d\n", rsm.me, index)
+	// Wait for apply/reject, if we have waited a long time
+	// this could be an instance where we were the leader, lost leadership (logs never get commited)
+	// and we never check if we are the leader, so force in a check every once in a while
+	var success bool
+	done := false
+	for !done {
+		select {
+		case success = <-op.successCh:
+			done = true
+		case <-time.After(waitTime):
+			term, isLeader := rsm.Raft().GetState()
+			rsm.mu.Lock()
+			rsm.checkLeader(term, isLeader)
+			rsm.mu.Unlock()
+		}
+	}
+
+	// fmt.Printf("S%d: Submit woke up for op %d, success: %t\n", rsm.me, index, success)
+
+	// Error on failure
+	if !success {
+		return rpc.ErrMaybe, nil
+	}
+
+	// Provide return value
+	return rpc.OK, op.ret
 }

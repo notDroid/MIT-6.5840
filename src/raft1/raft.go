@@ -695,6 +695,9 @@ func (rf *Raft) ticker() {
 			rf.mu.Lock()
 		}
 	}
+
+	// Signal death
+	rf.commitCond.Signal()
 }
 
 // Candidate routine: try to gather votes and become the leader
@@ -845,6 +848,9 @@ func (rf *Raft) executeLeaderRoutine(server, term int) {
 		}
 		rf.mu.Lock()
 	}
+
+	// Signal death event
+	rf.signalEvent()
 }
 
 // Handle sending the full snapshot to the server that needs it, reciever doesn't have to install it
@@ -860,7 +866,7 @@ func (rf *Raft) sendSnapshot(server int, term int) {
 
 	offset := 0
 	// Safety Check: verify term before modifying state
-	for offset < len(sp.Snapshot) {
+	for !rf.killed() && offset < len(sp.Snapshot) {
 		// fmt.Printf("Leader [%d] (%d) sending snapshot [%d]: snapshotIndex=%d\n", rf.me, rf.currentTerm, server, rf.snapshotIndex)
 		var done bool
 		var data []byte
@@ -969,6 +975,7 @@ func (rf *Raft) applyLogsRoutine() {
 
 		// Exit on killed
 		if rf.killed() {
+			close(rf.applyCh)
 			return
 		}
 
