@@ -1,7 +1,6 @@
 package kvraft
 
 import (
-	"math/rand"
 	"sync"
 
 	"6.5840/kvsrv1/rpc"
@@ -12,7 +11,6 @@ import (
 type Clerk struct {
 	clnt    *tester.Clnt
 	servers []string
-	me      int
 
 	mu       sync.Mutex
 	leaderId int
@@ -20,9 +18,9 @@ type Clerk struct {
 
 func MakeClerk(clnt *tester.Clnt, servers []string) kvtest.IKVClerk {
 	ck := &Clerk{
-		clnt:     clnt,
-		servers:  servers,
-		me:       rand.Int(),
+		clnt:    clnt,
+		servers: servers,
+
 		mu:       sync.Mutex{},
 		leaderId: 0,
 	}
@@ -53,10 +51,7 @@ func (ck *Clerk) setLeaderId(id int) {
 // must match the declared types of the RPC handler function's
 // arguments. Additionally, reply must be passed as a pointer.
 func (ck *Clerk) Get(key string) (string, rpc.Tversion, rpc.Err) {
-	args := KVArgs{
-		ClientId: ck.me,
-		Args:     rpc.GetArgs{Key: key},
-	}
+	args := rpc.GetArgs{Key: key}
 	reply := rpc.GetReply{}
 
 	// Keep searching for the leader until success
@@ -102,13 +97,10 @@ func (ck *Clerk) Get(key string) (string, rpc.Tversion, rpc.Err) {
 // must match the declared types of the RPC handler function's
 // arguments. Additionally, reply must be passed as a pointer.
 func (ck *Clerk) Put(key string, value string, version rpc.Tversion) rpc.Err {
-	args := KVArgs{
-		ClientId: ck.me,
-		Args: rpc.PutArgs{
-			Key:     key,
-			Value:   value,
-			Version: version,
-		},
+	args := rpc.PutArgs{
+		Key:     key,
+		Value:   value,
+		Version: version,
 	}
 	reply := rpc.PutReply{}
 

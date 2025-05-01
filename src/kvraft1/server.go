@@ -1,7 +1,7 @@
 package kvraft
 
 import (
-	"fmt"
+	"bytes"
 	"log"
 	"sync/atomic"
 
@@ -22,9 +22,9 @@ type KVServer struct {
 	versions map[string]rpc.Tversion
 }
 
-type KVArgs struct {
-	ClientId int
-	Args     any
+type SnapshotState struct {
+	Kvmap    map[string]string
+	Versions map[string]rpc.Tversion
 }
 
 // To type-cast req to the right type, take a look at Go's type switches or type
@@ -88,18 +88,40 @@ func (kv *KVServer) doPut(args rpc.PutArgs) rpc.PutReply {
 	return reply
 }
 
+// Encode key-value store into snapshot
 func (kv *KVServer) Snapshot() []byte {
-	fmt.Printf("SNAPSHOT\n")
-	return nil
+	state := SnapshotState{kv.kvmap, kv.versions}
+
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	err := e.Encode(state)
+	if err != nil {
+		log.Fatalf("Server [%d]: Error encoding snapshot: %v", kv.me, err)
+	}
+	return w.Bytes()
 }
 
 func (kv *KVServer) Restore(data []byte) {
-	fmt.Printf("RESTORE\n")
+	if len(data) < 1 { // bootstrap without any state?
+		return
+	}
+	var state SnapshotState
+
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+
+	err := d.Decode(&state)
+	if err != nil {
+		log.Fatalf("Server [%d]: Error decoding snapshot: %v", kv.me, err)
+	}
+
+	kv.kvmap = state.Kvmap
+	kv.versions = state.Versions
 }
 
-func (kv *KVServer) Get(args *KVArgs, reply *rpc.GetReply) {
+func (kv *KVServer) Get(args *rpc.GetArgs, reply *rpc.GetReply) {
 	// Submit request
-	err, ret := kv.rsm.Submit(args.Args.(rpc.GetArgs))
+	err, ret := kv.rsm.Submit(*args)
 
 	// On error give up
 	if err != rpc.OK {
@@ -111,9 +133,9 @@ func (kv *KVServer) Get(args *KVArgs, reply *rpc.GetReply) {
 	*reply = ret.(rpc.GetReply)
 }
 
-func (kv *KVServer) Put(args *KVArgs, reply *rpc.PutReply) {
+func (kv *KVServer) Put(args *rpc.PutArgs, reply *rpc.PutReply) {
 	// Submit request
-	err, ret := kv.rsm.Submit(args.Args.(rpc.PutArgs))
+	err, ret := kv.rsm.Submit(*args)
 
 	// Custom return on not okay
 	if err != rpc.OK {
@@ -148,7 +170,6 @@ func StartKVServer(servers []*labrpc.ClientEnd, gid tester.Tgid, me int, persist
 	// call labgob.Register on structures you want
 	// Go's RPC library to marshall/unmarshall.
 	labgob.Register(rsm.Op{})
-	labgob.Register(KVArgs{})
 	labgob.Register(rpc.PutArgs{})
 	labgob.Register(rpc.GetArgs{})
 

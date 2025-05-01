@@ -35,16 +35,20 @@ type StateMachine interface {
 }
 
 type RSM struct {
-	mu           sync.Mutex
-	me           int
-	rf           raftapi.Raft
-	applyCh      chan raftapi.ApplyMsg
-	maxraftstate int // snapshot if log grows this big
-	sm           StateMachine
+	mu      sync.Mutex
+	me      int
+	rf      raftapi.Raft
+	applyCh chan raftapi.ApplyMsg
+	sm      StateMachine
 
+	// Track raft state and requests
 	ops      map[int]*retWait // index -> Op
 	term     int
 	isLeader bool
+
+	// Snapshotting metadata
+	maxraftstate  int // snapshot if log grows this big
+	snapshotIndex int
 }
 
 // servers[] contains the ports of the set of
@@ -72,6 +76,8 @@ func MakeRSM(servers []*labrpc.ClientEnd, me int, persister *tester.Persister, m
 		ops:      make(map[int]*retWait),
 		term:     0,
 		isLeader: false,
+
+		snapshotIndex: 0,
 	}
 	if !useRaftStateMachine {
 		rsm.rf = raft.Make(servers, me, persister, rsm.applyCh)
@@ -111,8 +117,16 @@ func (rsm *RSM) HandleOps() {
 		ret := rsm.sm.DoOp(applyMsg.Command)
 
 		// Provide return value if there are waiters
-		rsm.handleReturns(applyMsg.CommandIndex, ret)
+		index := applyMsg.CommandIndex
+		rsm.handleReturns(index, ret)
 		// fmt.Printf("S%d: Finished applying command at index %d\n", rsm.me, applyMsg.CommandIndex)
+
+		// Snapshot if logs exceed limit
+
+		if rsm.maxraftstate != -1 && rsm.Raft().PersistBytes() > rsm.maxraftstate {
+			rsm.snapshotIndex = index
+			rsm.Raft().Snapshot(index, rsm.sm.Snapshot())
+		}
 	}
 	// Release anyone still waiting
 	rsm.mu.Lock()
