@@ -9,17 +9,17 @@ package shardkv
 //
 
 import (
-
 	"6.5840/kvsrv1/rpc"
-	"6.5840/kvtest1"
+	kvtest "6.5840/kvtest1"
+	"6.5840/shardkv1/shardcfg"
 	"6.5840/shardkv1/shardctrler"
-	"6.5840/tester1"
+	"6.5840/shardkv1/shardgrp"
+	tester "6.5840/tester1"
 )
 
 type Clerk struct {
 	clnt *tester.Clnt
 	sck  *shardctrler.ShardCtrler
-	// You will have to modify this struct.
 }
 
 // The tester calls MakeClerk and passes in a shardctrler so that
@@ -29,10 +29,9 @@ func MakeClerk(clnt *tester.Clnt, sck *shardctrler.ShardCtrler) kvtest.IKVClerk 
 		clnt: clnt,
 		sck:  sck,
 	}
-	// You'll have to add code here.
+
 	return ck
 }
-
 
 // Get a key from a shardgrp.  You can use shardcfg.Key2Shard(key) to
 // find the shard responsible for the key and ck.sck.Query() to read
@@ -40,12 +39,51 @@ func MakeClerk(clnt *tester.Clnt, sck *shardctrler.ShardCtrler) kvtest.IKVClerk 
 // responsible for key.  You can make a clerk for that group by
 // calling shardgrp.MakeClerk(ck.clnt, servers).
 func (ck *Clerk) Get(key string) (string, rpc.Tversion, rpc.Err) {
-	// You will have to modify this function.
-	return "", 0, ""
+	sId := shardcfg.Key2Shard(key)
+
+	var value string
+	var version rpc.Tversion
+	var err rpc.Err
+
+	// Keep trying shard groups
+	for {
+		// Query and find group that holds shard
+		cfg := ck.sck.Query()
+		gId := cfg.Shards[sId]
+
+		// Create clerk and contact shardgrp
+		clerk := shardgrp.MakeClerk(ck.clnt, cfg.Groups[gId])
+		value, version, err = clerk.Get(key)
+
+		// If we contacted the wrong group, try again
+		if err != rpc.ErrWrongGroup {
+			break
+		}
+	}
+
+	return value, version, err
 }
 
 // Put a key to a shard group.
 func (ck *Clerk) Put(key string, value string, version rpc.Tversion) rpc.Err {
-	// You will have to modify this function.
-	return ""
+	sId := shardcfg.Key2Shard(key)
+	var err rpc.Err
+
+	// Keep trying shard groups
+	for {
+		// Query and find group that holds shard
+		cfg := ck.sck.Query()
+		gId := cfg.Shards[sId]
+
+		// Create clerk and contact shardgrp
+		clerk := shardgrp.MakeClerk(ck.clnt, cfg.Groups[gId])
+		err = clerk.Put(key, value, version)
+
+		// If we contacted the wrong group, try again
+		if err != rpc.ErrWrongGroup {
+			break
+		}
+	}
+
+	return err
 }
