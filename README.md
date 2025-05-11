@@ -1,5 +1,5 @@
 # Distributed Systems Labs
-I did MIT's 6.5840 course: https://pdos.csail.mit.edu/6.824/index.html. This repo has my solutions for those labs.
+I did MIT's [6.5840](https://pdos.csail.mit.edu/6.824/index.html) course. This repo has my solutions for those labs.
 
 ## [Lab 1: MapReduce](https://github.com/notDroid/MIT-6.5840/tree/master/src/mr)
 - [Instructions](https://pdos.csail.mit.edu/6.824/labs/lab-mr.html)
