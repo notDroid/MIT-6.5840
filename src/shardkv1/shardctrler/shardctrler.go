@@ -5,7 +5,9 @@ package shardctrler
 //
 
 import (
+	"fmt"
 	"sync"
+	"time"
 
 	kvsrv "6.5840/kvsrv1"
 	"6.5840/kvsrv1/rpc"
@@ -19,19 +21,15 @@ import (
 type ShardCtrler struct {
 	clnt *tester.Clnt
 	kvtest.IKVClerk
-	clrks map[tester.Tgid]*shardgrp.Clerk
 
-	killed int32 // set by Kill()
-
-	mu  sync.Mutex
-	cfg shardcfg.ShardConfig
+	killed      int32 // set by Kill()
+	nextVersion rpc.Tversion
 }
 
 // Make a ShardCltler, which stores its state in a kvsrv.
 func MakeShardCtrler(clnt *tester.Clnt) *ShardCtrler {
 	sck := &ShardCtrler{
 		clnt: clnt,
-		mu:   sync.Mutex{},
 	}
 	srv := tester.ServerName(tester.GRP0, 0)
 	sck.IKVClerk = kvsrv.MakeClerk(clnt, srv)
@@ -43,7 +41,19 @@ func MakeShardCtrler(clnt *tester.Clnt) *ShardCtrler {
 // controller. In part A, this method doesn't need to do anything. In
 // B and C, this method implements recovery.
 func (sck *ShardCtrler) InitController() {
+	// Get current and next config
+	nextcfgS, nextVersion, _ := sck.IKVClerk.Get("nextcfg")
+	cfgS, _, _ := sck.IKVClerk.Get("cfg")
+	nextcfg := shardcfg.FromString(nextcfgS)
+	cfg := shardcfg.FromString(cfgS)
 
+	// Jump to current nextVersion
+	sck.nextVersion = nextVersion
+
+	// If we need to apply a config do it before returning
+	if nextcfg.Num > cfg.Num {
+		sck.ChangeConfigTo(nextcfg)
+	}
 }
 
 // Called once by the tester to supply the first configuration.  You
@@ -52,12 +62,10 @@ func (sck *ShardCtrler) InitController() {
 // pick the key to name the configuration.  The initial configuration
 // lists shardgrp shardcfg.Gid1 for all shards.
 func (sck *ShardCtrler) InitConfig(cfg *shardcfg.ShardConfig) {
-	// Get clerk groups
-	for gId, servers := range cfg.Groups {
-		sck.clrks[gId] = shardgrp.MakeClerk(sck.clnt, servers)
-	}
+	// Initialize config (if it already exists this does nothing)
 	sck.IKVClerk.Put("cfg", cfg.String(), 0)
-	sck.cfg = *cfg
+	sck.IKVClerk.Put("nextcfg", cfg.String(), 0)
+	sck.nextVersion = 1
 }
 
 // Called by the tester to ask the controller to change the
@@ -68,56 +76,157 @@ func (sck *ShardCtrler) ChangeConfigTo(new *shardcfg.ShardConfig) {
 	num := new.Num
 	wg := sync.WaitGroup{}
 
-	// Scan config for group changes
-	for sId, gId := range new.Shards {
-		// Exit on stale num
-		if new.Num != sck.cfg.Num {
-			return
+	// Get current config
+	cfgS, version, _ := sck.IKVClerk.Get("cfg")
+	cfg := shardcfg.FromString(cfgS)
+
+	// Check if the new config is already applied/old
+	if cfg.Num >= num {
+		fmt.Printf("Old config recieved\n")
+		return
+	}
+
+	// Put new version, if not already
+	for {
+		err := sck.IKVClerk.Put("nextcfg", new.String(), sck.nextVersion)
+		if err == rpc.ErrVersion || err == rpc.OK {
+			break
 		}
+	}
+	sck.nextVersion++
+
+	fmt.Printf("New config recieved\n")
+	// Scan config for group changes
+	for sIdi := range len(new.Shards) {
 		// Find moved shards
-		if gId == sck.cfg.Shards[sId] {
+		sId := shardcfg.Tshid(sIdi)
+
+		oldGId, oldServers, ook := cfg.GidServers(sId)
+		newGId, newServers, nok := new.GidServers(sId)
+
+		// Is moved?
+		if newGId == oldGId {
+			continue
+		}
+
+		// Give up on non existant group
+		if !ook || !nok {
+			fmt.Printf("GROUP DOESN'T EXIST SKIPPING\n")
 			continue
 		}
 
 		wg.Add(1)
 		// Move shard
-		go func(sId shardcfg.Tshid, gId tester.Tgid) {
+		go func(sId shardcfg.Tshid, oldServers, newServers []string) {
+			// fmt.Printf("Moving Shard %d, from %d to %d\n", sId, oldGId, newGId)
 			defer wg.Done()
-			clerk := sck.clrks[gId]
+			oldClerk := shardgrp.MakeClerk(sck.clnt, oldServers)
+			newClerk := shardgrp.MakeClerk(sck.clnt, newServers)
 
 			// Try freeze
-			state, err := clerk.FreezeShard(sId, num)
+			state, err := sck.FreezeShard(oldClerk, sId, num, len(oldServers))
 			// On old config give up
 			if err == rpc.ErrWrongGroup {
+				fmt.Printf("ERROR FREEZING SHARD\n")
 				return
 			}
 
 			// Try install shard
-			err = clerk.InstallShard(sId, state, num)
+			err = sck.InstallShard(newClerk, sId, state, num, len(newServers))
 			// On old config give up
 			if err == rpc.ErrWrongGroup {
+				fmt.Printf("ERROR INSTALLING SHARD\n")
 				return
 			}
 
 			// Try delete shard
-			clerk.DeleteShard(sId, num)
-		}(shardcfg.Tshid(sId), gId)
+			err = sck.DeleteShard(oldClerk, sId, num, len(oldServers))
+			if err == rpc.ErrWrongGroup {
+				fmt.Printf("ERROR DELETING SHARD\n")
+				return
+			}
+
+			// fmt.Printf("Success Moving Shard %d, from %d to %d\n", sId, oldGId, newGId)
+		}(sId, oldServers, newServers)
 	}
 	// Wait for all shards to be moved
 	wg.Wait()
 
-	// Update config
-	sck.mu.Lock()
-	sck.cfg = *new
-	sck.mu.Unlock()
-	sck.IKVClerk.Put("cfg", new.String(), 0)
+	// Update current config
+	sck.IKVClerk.Put("cfg", new.String(), version)
+	fmt.Printf("Config Updated\n")
 }
 
 // Return the current configuration
 func (sck *ShardCtrler) Query() *shardcfg.ShardConfig {
-	sck.mu.Lock()
-	defer sck.mu.Unlock()
+	// fmt.Printf("Config Queried\n")
+	cfg, _, _ := sck.IKVClerk.Get("cfg")
+	return shardcfg.FromString(cfg)
+}
 
-	cfg := sck.cfg // Heap allocate a copy of the current config
-	return &cfg
+// Freeze shard wrapper
+func (sck *ShardCtrler) FreezeShard(clerk *shardgrp.Clerk, sId shardcfg.Tshid, num shardcfg.Tnum, servers int) ([]byte, rpc.Err) {
+	const MaxAttempts = 10
+
+	attempts := 0
+	for {
+		if attempts >= MaxAttempts {
+			fmt.Printf("Assuming the group is down and the config was already changed...\n")
+			return nil, rpc.ErrWrongGroup
+		}
+		attempts++
+
+		// Try to install shard
+		state, err := clerk.FreezeShard(sId, num, 3*servers)
+
+		if err != rpc.ErrTimeout {
+			return state, err
+		}
+
+		time.Sleep(100 * time.Millisecond) // Wait before retrying
+	}
+}
+
+func (sck *ShardCtrler) InstallShard(clerk *shardgrp.Clerk, sId shardcfg.Tshid, state []byte, num shardcfg.Tnum, servers int) rpc.Err {
+	const MaxAttempts = 10
+
+	attempts := 0
+	for {
+		if attempts >= MaxAttempts {
+			fmt.Printf("Assuming the group is down and the config was already changed...\n")
+			return rpc.ErrWrongGroup
+		}
+		attempts++
+
+		// Try to install shard
+		err := clerk.InstallShard(sId, state, num, 3*servers)
+
+		if err != rpc.ErrTimeout {
+			return err
+		}
+
+		time.Sleep(100 * time.Millisecond) // Wait before retrying
+	}
+}
+
+func (sck *ShardCtrler) DeleteShard(clerk *shardgrp.Clerk, sId shardcfg.Tshid, num shardcfg.Tnum, servers int) rpc.Err {
+	const MaxAttempts = 10
+
+	attempts := 0
+	for {
+		if attempts >= MaxAttempts {
+			fmt.Printf("Assuming the group is down and the config was already changed...\n")
+			return rpc.ErrWrongGroup
+		}
+		attempts++
+
+		// Try to install shard
+		err := clerk.DeleteShard(sId, num, 3*servers)
+
+		if err != rpc.ErrTimeout {
+			return err
+		}
+
+		time.Sleep(100 * time.Millisecond) // Wait before retrying
+	}
 }

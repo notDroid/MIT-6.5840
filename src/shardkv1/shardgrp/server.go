@@ -81,9 +81,10 @@ func (kv *KVServer) doGet(args rpc.GetArgs) rpc.GetReply {
 		reply.Version = kv.versions[key]
 		reply.Err = rpc.OK
 	} else {
+		fmt.Printf("Server [%d]: kv=%v frozen=%v\n", kv.me, kv.kvmap, kv.frozenSet)
 		reply.Value = ""
 		reply.Version = 0
-		reply.Err = rpc.ErrWrongGroup
+		reply.Err = rpc.ErrNoKey
 	}
 
 	return reply
@@ -105,7 +106,7 @@ func (kv *KVServer) doPut(args rpc.PutArgs) rpc.PutReply {
 	if sv, in := kv.versions[key]; sv != version {
 		// Key doesn't exist
 		if !in {
-			reply.Err = rpc.ErrWrongGroup
+			reply.Err = rpc.ErrNoKey
 			return reply
 		}
 		// Version mismatch
@@ -147,7 +148,8 @@ func (kv *KVServer) doFreezeShard(args shardrpc.FreezeShardArgs) shardrpc.Freeze
 	kv.frozenSet[sId] = struct{}{}
 
 	// Assemble state struct
-	state := FrozenState{Keys: keys}
+	state := FrozenState{}
+	state.Keys = keys
 	for _, key := range keys {
 		state.Values = append(state.Values, kv.kvmap[key])
 		state.Versions = append(state.Versions, kv.versions[key])
@@ -187,19 +189,19 @@ func (kv *KVServer) doInstallShard(args shardrpc.InstallShardArgs) shardrpc.Inst
 	// Update version
 	kv.shardConfigNum[sId] = version
 	// If the shard was previously transferred out, unfreeze it
-	if _, in := kv.frozenSet[sId]; in {
-		delete(kv.frozenSet, sId)
-	}
+	delete(kv.frozenSet, sId)
 
 	// Decode state
 	var state FrozenState
 
-	r := bytes.NewBuffer(args.State)
-	d := labgob.NewDecoder(r)
+	if len(args.State) > 0 {
+		r := bytes.NewBuffer(args.State)
+		d := labgob.NewDecoder(r)
 
-	err := d.Decode(&state)
-	if err != nil {
-		log.Fatalf("Server [%d]: Error decoding frozen state: %v", kv.me, err)
+		err := d.Decode(&state)
+		if err != nil {
+			log.Fatalf("Server [%d]: Error decoding frozen state: %v", kv.me, err)
+		}
 	}
 
 	// Install
@@ -229,7 +231,7 @@ func (kv *KVServer) doDeleteShard(args shardrpc.DeleteShardArgs) shardrpc.Delete
 
 	// Delete shard
 	keys := kv.shard2key[sId]
-	delete(kv.shard2key, sId)
+	kv.shard2key[sId] = []string{}
 	for _, key := range keys {
 		delete(kv.kvmap, key)
 		delete(kv.versions, key)
@@ -379,7 +381,7 @@ func StartServerShardGrp(servers []*labrpc.ClientEnd, gid tester.Tgid, me int, p
 	labgob.Register(shardrpc.FreezeShardArgs{})
 	labgob.Register(shardrpc.InstallShardArgs{})
 	labgob.Register(shardrpc.DeleteShardArgs{})
-	labgob.Register(rsm.Op{})
+	labgob.Register(FrozenState{})
 
 	kv := &KVServer{
 		gid: gid,

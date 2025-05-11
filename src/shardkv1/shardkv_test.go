@@ -2,14 +2,16 @@ package shardkv
 
 import (
 	//"log"
+
+	"fmt"
 	"testing"
 	"time"
 
 	"6.5840/kvsrv1/rpc"
-	"6.5840/kvtest1"
+	kvtest "6.5840/kvtest1"
 	"6.5840/shardkv1/shardcfg"
 	"6.5840/shardkv1/shardctrler"
-	"6.5840/tester1"
+	tester "6.5840/tester1"
 )
 
 const (
@@ -102,7 +104,9 @@ func TestJoinBasic5A(t *testing.T) {
 		ts.t.Fatalf("TestJoinBasic5A: %d isn't a member of %v", gid2, cfg1)
 	}
 
+	fmt.Printf("Starting Shutdown Test...\n")
 	ts.checkShutdownSharding(gid1, ka, va)
+	fmt.Printf("Shutdown Test Successn")
 
 	for i := 0; i < len(ka); i++ {
 		ts.CheckGet(ck, ka[i], va[i], rpc.Tversion(1))

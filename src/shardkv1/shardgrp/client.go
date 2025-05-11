@@ -40,24 +40,28 @@ func (ck *Clerk) setLeaderId(id int) {
 	ck.mu.Unlock()
 }
 
-func (ck *Clerk) Get(key string) (string, rpc.Tversion, rpc.Err) {
+func (ck *Clerk) Get(key string, maxAttempts int) (string, rpc.Tversion, rpc.Err) {
 	args := rpc.GetArgs{Key: key}
 	reply := rpc.GetReply{}
 
 	// Keep searching for the leader until success
 	i := ck.getLeaderId()
+	attempts := 0
 	for {
+		if attempts >= maxAttempts {
+			reply.Err = rpc.ErrTimeout
+			break
+		}
+		attempts++
+
 		// Send RPC
 		ok := ck.clnt.Call(ck.servers[i], "KVServer.Get", &args, &reply)
 
 		// Stop sending on success
-		if ok && (reply.Err == rpc.OK || reply.Err == rpc.ErrNoKey) {
+		if ok && (reply.Err == rpc.OK || reply.Err == rpc.ErrNoKey || reply.Err == rpc.ErrWrongGroup) {
 			// Update leader id
 			ck.setLeaderId(i)
 			break
-		}
-		if reply.Err != rpc.ErrWrongLeader {
-			// fmt.Printf("Cycling... server=%d ok=%t err=%v\n", i, ok, reply.Err)
 		}
 
 		// Cycle on rpc failure or wrong leader
@@ -69,7 +73,7 @@ func (ck *Clerk) Get(key string) (string, rpc.Tversion, rpc.Err) {
 	return reply.Value, reply.Version, reply.Err
 }
 
-func (ck *Clerk) Put(key string, value string, version rpc.Tversion) rpc.Err {
+func (ck *Clerk) Put(key string, value string, version rpc.Tversion, maxAttempts int) (rpc.Err, bool) {
 	args := rpc.PutArgs{
 		Key:     key,
 		Value:   value,
@@ -80,12 +84,19 @@ func (ck *Clerk) Put(key string, value string, version rpc.Tversion) rpc.Err {
 	// Keep searching for the leader until success
 	maybeSuccess := false
 	i := ck.getLeaderId()
+	attempts := 0
 	for {
+		if attempts >= maxAttempts {
+			reply.Err = rpc.ErrTimeout
+			break
+		}
+		attempts++
+
 		// Send RPC
 		ok := ck.clnt.Call(ck.servers[i], "KVServer.Put", &args, &reply)
 
 		// Stop sending on success, accept rpc.ErrMaybe
-		if ok && !(reply.Err == rpc.ErrWrongLeader || reply.Err == rpc.ErrMaybe) {
+		if ok && reply.Err != rpc.ErrWrongLeader && reply.Err != rpc.ErrMaybe {
 			// Update leader id
 			ck.setLeaderId(i)
 			break
@@ -103,18 +114,25 @@ func (ck *Clerk) Put(key string, value string, version rpc.Tversion) rpc.Err {
 
 	// If our request results in a version error but we had a RPC fail before it, we might have done the PUT
 	if maybeSuccess && reply.Err == rpc.ErrVersion {
-		return rpc.ErrMaybe
+		reply.Err = rpc.ErrMaybe
 	}
-	return reply.Err
+	return reply.Err, maybeSuccess
 }
 
-func (ck *Clerk) FreezeShard(s shardcfg.Tshid, num shardcfg.Tnum) ([]byte, rpc.Err) {
+func (ck *Clerk) FreezeShard(s shardcfg.Tshid, num shardcfg.Tnum, maxAttempts int) ([]byte, rpc.Err) {
 	args := shardrpc.FreezeShardArgs{Shard: s, Num: num}
 	reply := shardrpc.FreezeShardReply{}
 
 	// Keep searching for the leader until success
 	i := ck.getLeaderId()
+	attempts := 0
 	for {
+		if attempts >= maxAttempts {
+			reply.Err = rpc.ErrTimeout
+			break
+		}
+		attempts++
+
 		// Send RPC
 		ok := ck.clnt.Call(ck.servers[i], "KVServer.FreezeShard", &args, &reply)
 
@@ -133,13 +151,20 @@ func (ck *Clerk) FreezeShard(s shardcfg.Tshid, num shardcfg.Tnum) ([]byte, rpc.E
 	return reply.State, reply.Err
 }
 
-func (ck *Clerk) InstallShard(s shardcfg.Tshid, state []byte, num shardcfg.Tnum) rpc.Err {
-	args := shardrpc.InstallShardArgs{Shard: s, Num: num}
+func (ck *Clerk) InstallShard(s shardcfg.Tshid, state []byte, num shardcfg.Tnum, maxAttempts int) rpc.Err {
+	args := shardrpc.InstallShardArgs{Shard: s, State: state, Num: num}
 	reply := shardrpc.InstallShardReply{}
 
 	// Keep searching for the leader until success
 	i := ck.getLeaderId()
+	attempts := 0
 	for {
+		if attempts >= maxAttempts {
+			reply.Err = rpc.ErrTimeout
+			break
+		}
+		attempts++
+
 		// Send RPC
 		ok := ck.clnt.Call(ck.servers[i], "KVServer.InstallShard", &args, &reply)
 
@@ -158,13 +183,20 @@ func (ck *Clerk) InstallShard(s shardcfg.Tshid, state []byte, num shardcfg.Tnum)
 	return reply.Err
 }
 
-func (ck *Clerk) DeleteShard(s shardcfg.Tshid, num shardcfg.Tnum) rpc.Err {
+func (ck *Clerk) DeleteShard(s shardcfg.Tshid, num shardcfg.Tnum, maxAttempts int) rpc.Err {
 	args := shardrpc.DeleteShardArgs{Shard: s, Num: num}
 	reply := shardrpc.DeleteShardReply{}
 
 	// Keep searching for the leader until success
 	i := ck.getLeaderId()
+	attempts := 0
 	for {
+		if attempts >= maxAttempts {
+			reply.Err = rpc.ErrTimeout
+			break
+		}
+		attempts++
+
 		// Send RPC
 		ok := ck.clnt.Call(ck.servers[i], "KVServer.DeleteShard", &args, &reply)
 
