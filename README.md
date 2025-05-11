@@ -56,7 +56,7 @@ Many distributed applications can be coordinated and fault tolerant through just
 
 <img width="300" alt="Zookeeper" src="https://github.com/user-attachments/assets/d2f83e95-e663-47d7-b652-62eaa7c73aab" />
 
-## [6.5840 Lab 5: Sharded Key/Value Service](https://github.com/notDroid/MIT-6.5840/tree/master/src/shardkv1)
+## [Lab 5: Sharded Key/Value Service](https://github.com/notDroid/MIT-6.5840/tree/master/src/shardkv1)
 - [Instructions](https://pdos.csail.mit.edu/6.824/labs/lab-shard1.html)
 
 This lab extends lab 4 and distributes partitions of the keys (called shards) among replicated shard groups, this makes it so that we can keep adding shard groups to never run out of space.
